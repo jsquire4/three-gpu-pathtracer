@@ -29,6 +29,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { getScaledSettings } from './utils/getScaledSettings.js';
 import { LoaderElement } from './utils/LoaderElement.js';
 import { ParallelMeshBVHWorker } from 'three-mesh-bvh/src/workers/ParallelMeshBVHWorker.js';
+import { LDrawConditionalLineMaterial } from 'three/addons/materials/LDrawConditionalLineMaterial.js';
 
 const envMaps = {
 	'Royal Esplanade': 'https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/equirectangular/royal_esplanade_1k.hdr',
@@ -710,6 +711,7 @@ async function loadModel( url, onProgress ) {
 
 		const complete = new Promise( resolve => manager.onLoad = resolve );
 		const ldrawLoader = new LDrawLoader( manager );
+		ldrawLoader.setConditionalLineMaterial( LDrawConditionalLineMaterial );
 		await ldrawLoader.preloadMaterials( 'https://raw.githubusercontent.com/gkjohnson/ldraw-parts-library/master/colors/ldcfgalt.ldr' );
 		const result = await ldrawLoader
 			.setPartsLibraryPath( 'https://raw.githubusercontent.com/gkjohnson/ldraw-parts-library/master/complete/ldraw/' )
