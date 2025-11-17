@@ -71,8 +71,6 @@ const envMaps = {
 
 };
 
-const models = window.MODEL_LIST || {};
-
 const params = {
 
 	multipleImportanceSampling: true,
@@ -118,12 +116,30 @@ let pathTracer, renderer, orthoCamera, perspectiveCamera, activeCamera;
 let controls, scene, model;
 let gradientMap;
 let loader;
+let models;
 
 const orthoWidth = 2;
 
 init();
 
+async function waitFrame() {
+
+	return new Promise( resolve => requestAnimationFrame( resolve ) );
+
+}
+
 async function init() {
+
+	// Wait for the models list to be available since vite doesn't guarantee execution order
+	// of module tags and we rely on the other script to define the set of models for display
+	// in this example. TODO: handle this more gracefully.
+	while ( ! window.MODEL_LIST ) {
+
+		await waitFrame();
+
+	}
+
+	models = window.MODEL_LIST || {};
 
 	loader = new LoaderElement();
 	loader.attach( document.body );
