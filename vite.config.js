@@ -7,6 +7,7 @@ export default {
 	base: '',
 	build: {
 		outDir: './bundle/',
+		sourcemap: true,
 		rollupOptions: {
 			input: fs
 				.readdirSync( './example/' )
