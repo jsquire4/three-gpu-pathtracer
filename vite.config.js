@@ -22,6 +22,8 @@ export default {
 				searchForWorkspaceRoot( process.cwd() ),
 			],
 		},
-	}
-
+	},
+	optimizeDeps: {
+    	exclude: [ 'three-mesh-bvh' ],
+  	},
 };
