@@ -193,17 +193,20 @@ function animate() {
 	updateFloatingObjects();
 	pathTracer.renderSample();
 
-	const originAutoClear = renderer.autoClear;
+	const originalAutoClear = renderer.autoClear;
+	const originalBackground = scene.background;
 	renderer.autoClear = false;
+	scene.background = null;
 	scene.overrideMaterial = depthMaterial;
 	renderer.clearDepth();
 	// render depth of the scene
 	renderer.render( scene, camera );
 	scene.overrideMaterial = null;
+	scene.background = originalBackground;
 
 	// render real time floating objects
 	renderer.render( overlayScene, camera );
-	renderer.autoClear = originAutoClear;
+	renderer.autoClear = originalAutoClear;
 
 	loader.setSamples( pathTracer.samples, pathTracer.isCompiling );
 
