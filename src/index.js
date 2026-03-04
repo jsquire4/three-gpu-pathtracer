@@ -22,3 +22,4 @@ export * from './materials/surface/FogVolumeMaterial.js';
 // deprecated
 export * from './materials/pathtracing/PhysicalPathTracingMaterial.js';
 export * from './core/PathTracingRenderer.js';
+export * from './materials/surface/AmbientOcclusionMaterial.js';
