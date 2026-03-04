@@ -5,7 +5,7 @@ import {
 	WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { WebGLPathTracer } from '../src/index.js';
+import { WebGLPathTracer } from 'three-gpu-pathtracer';
 import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js';
 import { LoaderElement } from './utils/LoaderElement.js';
 import { getScaledSettings } from './utils/getScaledSettings.js';
