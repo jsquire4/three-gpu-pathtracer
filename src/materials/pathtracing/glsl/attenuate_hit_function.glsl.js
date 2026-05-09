@@ -152,6 +152,52 @@ export const attenuate_hit_function = /* glsl */`
 
 				}
 
+				// stainedglass fork — Phase 4 caustic-texture patch.
+				// At each transmissive hit, sample the material normalMap and
+				// apply a small perturbation to the shadow ray direction. The
+				// shadow ray continues toward the light via attenuateHit's
+				// loop, gathering Beer-Lambert attenuation as before; the
+				// normalMap-driven tilt imprints surface texture variation
+				// onto NEE caustic projections — flat glass through pure-NEE
+				// produces knife-edge caustics, while perturbed shadow rays
+				// pick up the per-pixel surface relief (waterglass ripple,
+				// hammered mottle, etc.) that the BSDF transmission lobe
+				// already integrates for camera-ray-direct paths.
+				//
+				// Magnitude scales with (IOR - 1) so air (IOR=1) produces no
+				// perturbation, and rises with refractive contrast. For
+				// soda-lime glass (IOR=1.52), perturbStrength ≈ 0.052 — a
+				// small angular tilt that varies with normalMap.xy, keeping
+				// the shadow ray approximately aimed at the light.
+				if ( material.normalMap != - 1 ) {
+
+					vec4 tangentSample = textureSampleBarycoord(
+						attributesArray,
+						ATTR_TANGENT,
+						surfaceHit.barycoord,
+						surfaceHit.faceIndices.xyz
+					);
+
+					// Tangent attribute may be (0,0,0) for geometry without
+					// computed tangents — skip in that case (no perturbation
+					// would be physically meaningful without a TBN basis).
+					if ( length( tangentSample.xyz ) > 0.0 ) {
+
+						vec3 faceN = surfaceHit.faceNormal * surfaceHit.side;
+						vec3 tangent = normalize( tangentSample.xyz );
+						vec3 bitangent = normalize( cross( faceN, tangent ) * tangentSample.w );
+						vec3 nuvPrime = material.normalMapTransform * vec3( uv, 1 );
+						vec3 texNormal = texture2D( textures, vec3( nuvPrime.xy, material.normalMap ) ).xyz * 2.0 - 1.0;
+						texNormal.xy *= material.normalScale;
+						// World-space perturbation vector in the tangent plane.
+						vec3 dN = tangent * texNormal.x + bitangent * texNormal.y;
+						float perturbStrength = ( material.ior - 1.0 ) * 0.1;
+						ray.direction = normalize( ray.direction + dN * perturbStrength );
+
+					}
+
+				}
+
 				bool isTransmissiveRay = dot( ray.direction, surfaceHit.faceNormal * surfaceHit.side ) < 0.0;
 				if ( ( isTransmissiveRay || isEntering ) && transmissiveTraversals > 0 ) {
 
