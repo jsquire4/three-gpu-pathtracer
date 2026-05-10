@@ -8498,8 +8498,16 @@ bool bvhIntersectFogVolumeHit(
 							float( lights.count ) :
 							float( lights.count + 1u );
 
-					// final color
+					// final color — additive Σ/count must start with α=0 so stray reads never imply a bogus sample.
+					#if FEATURE_ADDITIVE_ACCUM
+
+					gl_FragColor = vec4( 0.0 );
+
+					#else
+
 					gl_FragColor = vec4( 0, 0, 0, 1 );
+
+					#endif
 
 					// surface results
 					SurfaceHit surfaceHit;
@@ -8661,7 +8669,11 @@ bool bvhIntersectFogVolumeHit(
 
 						#endif
 
-						#if FEATURE_ADDITIVE_ACCUM == 0
+						#if FEATURE_ADDITIVE_ACCUM
+
+						// Sum/count mode: matte fast-path would skip radiance while final α still becomes 1 — skip it.
+
+						#else
 
 						// early out if this is a matte material
 						if ( material.matte && state.firstRay ) {
@@ -9933,6 +9945,17 @@ bool bvhIntersectFogVolumeHit(
 			if ( this._quad.material.uniforms.divideByAlpha ) {
 
 				this._quad.material.uniforms.divideByAlpha.value = displayDivideByAlpha ? 1 : 0;
+
+			}
+
+			// Canvas default premultipliedAlpha + <premultiplied_alpha_fragment> does rgb *= alpha after
+			// opacity; combined with the HDR divide-by-α preview it reads as progressive darkening while
+			// the PT quad fades in. Use straight alpha for sum/count display only.
+			const quadPM = displayDivideByAlpha ? false : this._renderer.getContextAttributes().premultipliedAlpha;
+			if ( this._quad.material.premultipliedAlpha !== quadPM ) {
+
+				this._quad.material.premultipliedAlpha = quadPM;
+				this._quad.material.needsUpdate = true;
 
 			}
 

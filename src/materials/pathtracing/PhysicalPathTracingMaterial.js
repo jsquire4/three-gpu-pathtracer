@@ -392,8 +392,16 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 							float( lights.count ) :
 							float( lights.count + 1u );
 
-					// final color
+					// final color — additive Σ/count must start with α=0 so stray reads never imply a bogus sample.
+					#if FEATURE_ADDITIVE_ACCUM
+
+					gl_FragColor = vec4( 0.0 );
+
+					#else
+
 					gl_FragColor = vec4( 0, 0, 0, 1 );
+
+					#endif
 
 					// surface results
 					SurfaceHit surfaceHit;
@@ -555,7 +563,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 						#endif
 
-						#if FEATURE_ADDITIVE_ACCUM == 0
+						#if FEATURE_ADDITIVE_ACCUM
+
+						// Sum/count mode: matte fast-path would skip radiance while final α still becomes 1 — skip it.
+
+						#else
 
 						// early out if this is a matte material
 						if ( material.matte && state.firstRay ) {

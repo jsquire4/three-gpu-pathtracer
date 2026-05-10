@@ -188,6 +188,17 @@ export class WebGLPathTracer {
 
 		}
 
+		// Canvas default premultipliedAlpha + <premultiplied_alpha_fragment> does rgb *= alpha after
+		// opacity; combined with the HDR divide-by-α preview it reads as progressive darkening while
+		// the PT quad fades in. Use straight alpha for sum/count display only.
+		const quadPM = displayDivideByAlpha ? false : this._renderer.getContextAttributes().premultipliedAlpha;
+		if ( this._quad.material.premultipliedAlpha !== quadPM ) {
+
+			this._quad.material.premultipliedAlpha = quadPM;
+			this._quad.material.needsUpdate = true;
+
+		}
+
 	}
 
 	setBVHWorker( worker ) {
