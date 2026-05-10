@@ -64,6 +64,12 @@ export class ClampedInterpolationMaterial extends ShaderMaterial {
 
 					vec4 res = texelFetch( map, ivec2( px.x, px.y ), 0 );
 
+					if ( divideByAlpha > 0.5 ) {
+
+						res.rgb /= max( res.a, 1e-6 );
+
+					}
+
 					#if defined( TONE_MAPPING )
 
 					res.xyz = toneMapping( res.xyz );
@@ -87,42 +93,19 @@ export class ClampedInterpolationMaterial extends ShaderMaterial {
 					vec2 pxNext = clamp( pxOffset + pxCurr, vec2( 0.0 ), size - 1.0 );
 					vec2 alpha = abs( pxFrac );
 
-					// Sum/count HDR (additive accumulation): do not bilinear-filter Σrgb and α then divide —
-					// mix(Σ)/mix(α) is not mix(Σ/α); bias worsens as counts diverge (adaptive tiles), which
-					// reads as fading/wrong exposure. Use nearest texel, divide once (correct per-pixel mean).
-					if ( divideByAlpha > 0.5 ) {
+					vec4 p1 = mix(
+						clampedTexelFatch( map, ivec2( pxCurr.x, pxCurr.y ), 0 ),
+						clampedTexelFatch( map, ivec2( pxNext.x, pxCurr.y ), 0 ),
+						alpha.x
+					);
 
-						ivec2 px = ivec2( clamp( floor( pxUv ), vec2( 0.0 ), size - vec2( 1.0 ) ) );
-						vec4 raw = texelFetch( map, px, 0 );
-						vec3 hdrRgb = raw.rgb / max( raw.a, 1e-6 );
-						vec4 res = vec4( hdrRgb, 1.0 );
+					vec4 p2 = mix(
+						clampedTexelFatch( map, ivec2( pxCurr.x, pxNext.y ), 0 ),
+						clampedTexelFatch( map, ivec2( pxNext.x, pxNext.y ), 0 ),
+						alpha.x
+					);
 
-						#if defined( TONE_MAPPING )
-
-						res.xyz = toneMapping( res.xyz );
-
-						#endif
-
-						gl_FragColor = linearToOutputTexel( res );
-
-					} else {
-
-						vec4 p1 = mix(
-							clampedTexelFatch( map, ivec2( pxCurr.x, pxCurr.y ), 0 ),
-							clampedTexelFatch( map, ivec2( pxNext.x, pxCurr.y ), 0 ),
-							alpha.x
-						);
-
-						vec4 p2 = mix(
-							clampedTexelFatch( map, ivec2( pxCurr.x, pxNext.y ), 0 ),
-							clampedTexelFatch( map, ivec2( pxNext.x, pxNext.y ), 0 ),
-							alpha.x
-						);
-
-						gl_FragColor = mix( p1, p2, alpha.y );
-
-					}
-
+					gl_FragColor = mix( p1, p2, alpha.y );
 					gl_FragColor.a *= opacity;
 					#include <premultiplied_alpha_fragment>
 
