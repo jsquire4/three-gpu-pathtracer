@@ -192,6 +192,77 @@ export const bsdf_functions = /* glsl */`
 
 	}
 
+	// ── Sprint 8: Chromatic dispersion via Cauchy formula + Jakob+Hanika rider ──
+	//
+	// evalSpectrum: 6-instruction sigmoid polynomial evaluation.
+	// GLSL mirror of @vitrum/shared-samplers/src/jakobHanika.ts::evaluateSpectrum.
+	// sigmoid(x) = 0.5 + x * inversesqrt(1 + x²) * 0.5
+	//
+	// coeffs = (c0, c1, c2) from host-side rgbToSpectralCoefficients.
+	// lambda  = wavelength in nm.
+	float evalSpectrum( vec3 coeffs, float lambda ) {
+		float x = coeffs.x + coeffs.y * lambda + coeffs.z * lambda * lambda;
+		return 0.5 + x * inversesqrt( 1.0 + x * x ) * 0.5;
+	}
+
+	// Sprint 8: dielectric transmission with per-channel IOR via Cauchy formula.
+	// Stochastically selects one of three wavelengths {700, 550, 450} nm,
+	// weights that channel by 3× (importance-sampling the 1/3-probability choice),
+	// and refracts along the wavelength-specific direction.
+	//
+	// Gate: only active when u_dispersionStrength > 1e-4.  Falls back to the
+	// single-IOR path (transmissionDirection) when dispersion is disabled.
+	// This ensures non-bevel glass pays zero per-channel cost.
+	//
+	// Per plan/sprint-8-pt-fork-patch.md §1-2.
+	vec3 dispersionTransmissionDirection( vec3 wo, SurfaceRecord surf, inout vec3 channelMask ) {
+
+		const float LAMBDA_R = 700.0;  // nm — red channel
+		const float LAMBDA_G = 550.0;  // nm — green channel
+		const float LAMBDA_B = 450.0;  // nm — blue channel
+
+		// Per-channel spectral weight from Jakob+Hanika polynomial.
+		float specR = evalSpectrum( u_jakobCoeffs, LAMBDA_R );
+		float specG = evalSpectrum( u_jakobCoeffs, LAMBDA_G );
+		float specB = evalSpectrum( u_jakobCoeffs, LAMBDA_B );
+
+		// Per-channel IOR from Cauchy formula.
+		// u_dispersionStrength is the Cauchy B coefficient in nm² scale.
+		// u_ior0 is the base IOR at 589.3 nm.
+		float iorR = u_ior0 + u_dispersionStrength * specR / ( LAMBDA_R * LAMBDA_R );
+		float iorG = u_ior0 + u_dispersionStrength * specG / ( LAMBDA_G * LAMBDA_G );
+		float iorB = u_ior0 + u_dispersionStrength * specB / ( LAMBDA_B * LAMBDA_B );
+
+		// Stochastic wavelength selection: choose one of three channels (1/3 each).
+		// Weight the chosen channel by 3× to maintain unbiased expectation.
+		float choiceRand = rand( 23 );
+		float chosenIor;
+		if ( choiceRand < 1.0 / 3.0 ) {
+			chosenIor = iorR;
+			channelMask = vec3( 3.0, 0.0, 0.0 );
+		} else if ( choiceRand < 2.0 / 3.0 ) {
+			chosenIor = iorG;
+			channelMask = vec3( 0.0, 3.0, 0.0 );
+		} else {
+			chosenIor = iorB;
+			channelMask = vec3( 0.0, 0.0, 3.0 );
+		}
+
+		// Refract using the chosen per-wavelength IOR (front-face: air→glass = 1/ior).
+		bool frontFace = surf.frontFace;
+		float eta = frontFace ? 1.0 / chosenIor : chosenIor;
+
+		float roughness = surf.filteredRoughness;
+		vec3 halfVector = normalize( vec3( 0.0, 0.0, 1.0 ) + sampleSphere( rand2( 13 ) ) * roughness );
+		vec3 lightDirection = refract( normalize( - wo ), halfVector, eta );
+
+		if ( surf.thinFilm ) {
+			lightDirection = - refract( normalize( - lightDirection ), - vec3( 0.0, 0.0, 1.0 ), 1.0 / eta );
+		}
+		return normalize( lightDirection );
+
+	}
+
 	// clearcoat
 	float clearcoatEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, inout vec3 color ) {
 
@@ -461,8 +532,22 @@ export const bsdf_functions = /* glsl */`
 
 		} else if ( r <= cdf[2] ) { // transmission / refraction
 
-			wi = transmissionDirection( wo, surf );
-			clearcoatWi = normalize( clearcoatInvBasis * normalize( normalBasis * wi ) );
+			// Sprint 8: per-channel IOR via Cauchy formula when dispersion is enabled.
+			// Gate: u_dispersionStrength > 1e-4 (non-bevel glass takes the fast path).
+			if ( u_dispersionStrength > 1e-4 ) {
+				vec3 channelMask = vec3( 1.0 );
+				wi = dispersionTransmissionDirection( wo, surf, channelMask );
+				clearcoatWi = normalize( clearcoatInvBasis * normalize( normalBasis * wi ) );
+				ScatterRecord dispResult;
+				dispResult.pdf = bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, dispResult.specularPdf, dispResult.color );
+				// Apply the 3× channel weight from stochastic wavelength selection.
+				dispResult.color *= channelMask;
+				dispResult.direction = normalize( surf.normalBasis * wi );
+				return dispResult;
+			} else {
+				wi = transmissionDirection( wo, surf );
+				clearcoatWi = normalize( clearcoatInvBasis * normalize( normalBasis * wi ) );
+			}
 
 		} else if ( r <= cdf[3] ) { // clearcoat
 
