@@ -8498,16 +8498,8 @@ bool bvhIntersectFogVolumeHit(
 							float( lights.count ) :
 							float( lights.count + 1u );
 
-					// final color — additive Σ/count must start with α=0 so stray reads never imply a bogus sample.
-					#if FEATURE_ADDITIVE_ACCUM
-
-					gl_FragColor = vec4( 0.0 );
-
-					#else
-
+					// final color
 					gl_FragColor = vec4( 0, 0, 0, 1 );
-
-					#endif
 
 					// surface results
 					SurfaceHit surfaceHit;
