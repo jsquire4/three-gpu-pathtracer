@@ -9542,12 +9542,6 @@ bool bvhIntersectFogVolumeHit(
 
 					vec4 res = texelFetch( map, ivec2( px.x, px.y ), 0 );
 
-					if ( divideByAlpha > 0.5 ) {
-
-						res.rgb /= max( res.a, 1e-6 );
-
-					}
-
 					#if defined( TONE_MAPPING )
 
 					res.xyz = toneMapping( res.xyz );
@@ -9571,21 +9565,14 @@ bool bvhIntersectFogVolumeHit(
 					vec2 pxNext = clamp( pxOffset + pxCurr, vec2( 0.0 ), size - 1.0 );
 					vec2 alpha = abs( pxFrac );
 
-					// Sum/count HDR buffers (additive accumulation): interpolate Σrgb and count together,
-					// then divide once. Mixing (rgb/a) across neighbors is wrong when counts differ — e.g.
-					// adaptive tile repeats — and reads as boundary seams, sparkle noise, and blown highs.
+					// Sum/count HDR (additive accumulation): do not bilinear-filter Σrgb and α then divide —
+					// mix(Σ)/mix(α) is not mix(Σ/α); bias worsens as counts diverge (adaptive tiles), which
+					// reads as fading/wrong exposure. Use nearest texel, divide once (correct per-pixel mean).
 					if ( divideByAlpha > 0.5 ) {
 
-						vec4 c00 = texelFetch( map, ivec2( pxCurr.x, pxCurr.y ), 0 );
-						vec4 c10 = texelFetch( map, ivec2( pxNext.x, pxCurr.y ), 0 );
-						vec4 c01 = texelFetch( map, ivec2( pxCurr.x, pxNext.y ), 0 );
-						vec4 c11 = texelFetch( map, ivec2( pxNext.x, pxNext.y ), 0 );
-						vec4 blended = mix(
-							mix( c00, c10, alpha.x ),
-							mix( c01, c11, alpha.x ),
-							alpha.y
-						);
-						vec3 hdrRgb = blended.rgb / max( blended.a, 1e-6 );
+						ivec2 px = ivec2( clamp( floor( pxUv ), vec2( 0.0 ), size - vec2( 1.0 ) ) );
+						vec4 raw = texelFetch( map, px, 0 );
+						vec3 hdrRgb = raw.rgb / max( raw.a, 1e-6 );
 						vec4 res = vec4( hdrRgb, 1.0 );
 
 						#if defined( TONE_MAPPING )
