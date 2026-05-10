@@ -140,6 +140,27 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				u_ior0: { value: 1.5 },
 				u_dispersionStrength: { value: 0.0 },
 				u_jakobCoeffs: { value: new Vector3( 0.0, 0.0, 0.0 ) },
+
+				// Sprint 12: hero-wavelength spectral accumulator uniforms.
+				// CMF arrays (81 entries each, 380–780 nm at 5 nm steps).
+				// Populated from @vitrum/shared-samplers CIE_X/Y/Z_TABLE on host init.
+				// uYCmfCdf[82]: normalised CDF of ȳ(λ) for hero wavelength sampling.
+				// uYCmfIntegral: ∫ Y dλ (nm) ≈ 106.857.
+				//
+				// Sprint 12 Cauchy IOR uniforms (replaces Sprint 8 ior0 + dispersionStrength).
+				// iorCauchyA/B/C in µm units; see plan/sprint-12-pt-fork-patch.md §3.
+				//
+				// NOTE: Ray payload restructure (vec3 throughput → float wavelength + float throughput)
+				// is NOT yet applied — see SPRINT_12_GAPS.md. Uniforms wired in advance
+				// so the host can upload CMF data without a GLSL recompile.
+				uCmfX: { value: new Float32Array( 81 ) },
+				uCmfY: { value: new Float32Array( 81 ) },
+				uCmfZ: { value: new Float32Array( 81 ) },
+				uYCmfCdf: { value: new Float32Array( 82 ) },
+				uYCmfIntegral: { value: 106.857 },
+				iorCauchyA: { value: 1.5 },
+				iorCauchyB: { value: 0.0 },
+				iorCauchyC: { value: 0.0 },
 			},
 
 			vertexShader: /* glsl */`
@@ -296,6 +317,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				${ BSDFGLSL.iridescence_functions }
 				${ BSDFGLSL.fog_functions }
 				${ BSDFGLSL.volume_march }
+				${ BSDFGLSL.spectral_accumulator }
 				${ BSDFGLSL.bsdf_functions }
 
 				float applyFilteredGlossy( float roughness, float accumulatedRoughness ) {

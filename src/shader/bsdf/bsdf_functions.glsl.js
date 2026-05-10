@@ -192,6 +192,40 @@ export const bsdf_functions = /* glsl */`
 
 	}
 
+	// ── Sprint 12: Cauchy IOR at arbitrary wavelength ────────────────────────────
+	//
+	// cauchyIORatLambda: evaluate IOR at a given wavelength using the three-term Cauchy formula.
+	// GLSL mirror of @vitrum/shared-samplers/src/cauchyIor.ts::cauchyIOR.
+	//
+	// Parameters: lambdaNm in nm; A, B, C in µm units (Sprint 12 coefficient form).
+	//   n(λ) = A + B/λ² + C/λ⁴    (λ in µm)
+	//
+	// This function is the Sprint 12 replacement for Sprint 8's per-channel Cauchy approach.
+	// It is called at the hero wavelength sampled from sampleHeroWavelength in the main loop.
+	//
+	// New uniforms: iorCauchyA, iorCauchyB, iorCauchyC (see PhysicalPathTracingMaterial.js).
+	// Sprint 8 uniforms (u_ior0, u_dispersionStrength) are kept for backward compatibility.
+	//
+	// TODO(sprint-12-payload): once the ray payload is restructured from vec3 throughput to
+	// (float wavelength, float throughput), replace the Sprint 8 per-channel gate in
+	// dispersionTransmissionDirection() with a call to cauchyIORatLambda(heroWavelength, A, B, C).
+	// See SPRINT_12_GAPS.md §1 for the full payload restructure plan.
+	float cauchyIORatLambda( float lambdaNm, float A, float B, float C ) {
+		float lambdaUm = lambdaNm * 0.001;  // nm → µm
+		float lam2 = lambdaUm * lambdaUm;
+		float lam4 = lam2 * lam2;
+		// Fast path: skip C term when near-zero to save one division.
+		if ( abs( C ) < 1e-8 ) return A + B / lam2;
+		return A + B / lam2 + C / lam4;
+	}
+
+	// Sprint 12: Jakob+Hanika spectral reflectance weight at arbitrary hero wavelength.
+	// When the payload carries a scalar hero wavelength (post-restructure), this replaces
+	// the per-channel evalSpectrum calls in dispersionTransmissionDirection.
+	float evalSpectrumAtHero( float lambdaNm ) {
+		return evalSpectrum( u_jakobCoeffs, lambdaNm );
+	}
+
 	// ── Sprint 8: Chromatic dispersion via Cauchy formula + Jakob+Hanika rider ──
 	//
 	// evalSpectrum: 6-instruction sigmoid polynomial evaluation.
