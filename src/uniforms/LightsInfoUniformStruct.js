@@ -15,6 +15,13 @@ const worldQuaternion = new Quaternion();
 const eye = new Vector3();
 const target = new Vector3();
 const up = new Vector3( 0, 1, 0 );
+
+function luminance( r, g, b ) {
+
+	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+}
+
 export class LightsInfoUniformStruct {
 
 	constructor() {
@@ -114,7 +121,8 @@ export class LightsInfoUniformStruct {
 				floatArray[ baseIndex + ( index ++ ) ] = u.x;
 				floatArray[ baseIndex + ( index ++ ) ] = u.y;
 				floatArray[ baseIndex + ( index ++ ) ] = u.z;
-				index ++;
+				const areaScale = l.isCircular ? ( Math.PI / 4.0 ) : 1.0;
+				floatArray[ baseIndex + ( index ++ ) ] = luminance( l.color.r, l.color.g, l.color.b ) * l.intensity * ( l.width * l.height ) * areaScale;
 
 				// sample 4
 				// v vector
@@ -142,7 +150,7 @@ export class LightsInfoUniformStruct {
 				floatArray[ baseIndex + ( index ++ ) ] = u.x;
 				floatArray[ baseIndex + ( index ++ ) ] = u.y;
 				floatArray[ baseIndex + ( index ++ ) ] = u.z;
-				index ++;
+				floatArray[ baseIndex + ( index ++ ) ] = luminance( l.color.r, l.color.g, l.color.b ) * l.intensity;
 
 				// sample 4
 				// v vector
@@ -184,7 +192,7 @@ export class LightsInfoUniformStruct {
 				floatArray[ baseIndex + ( index ++ ) ] = worldPosition.x;
 				floatArray[ baseIndex + ( index ++ ) ] = worldPosition.y;
 				floatArray[ baseIndex + ( index ++ ) ] = worldPosition.z;
-				index ++;
+				floatArray[ baseIndex + ( index ++ ) ] = luminance( l.color.r, l.color.g, l.color.b ) * l.intensity;
 
 				// sample 4
 				index += 4;
@@ -206,6 +214,7 @@ export class LightsInfoUniformStruct {
 				floatArray[ baseIndex + ( index ++ ) ] = target.x;
 				floatArray[ baseIndex + ( index ++ ) ] = target.y;
 				floatArray[ baseIndex + ( index ++ ) ] = target.z;
+				floatArray[ baseIndex + ( index ++ ) ] = luminance( l.color.r, l.color.g, l.color.b ) * l.intensity;
 
 			}
 
