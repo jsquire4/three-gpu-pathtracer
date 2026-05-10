@@ -5508,9 +5508,55 @@
 		return heroScalarFromRgb( rgb, heroWavelength );
 	}
 
-float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, bool hasSpectral, uint materialIndex, float heroWavelength ) {
-	return heroScalarFromRgb( transmissionAttenuation( dist, attColor, attDist ), heroWavelength );
-}
+	// Packed spectral μ(λ) grid: MaterialsTexture.js texels 20..27 (32 floats),
+	// uniform wavelength samples 380..780 nm (matches SPECTRAL_GRID_* in JS).
+	float readSpectralAttenuationMu( sampler2D materialsTex, uint materialIndex, uint spectralIdx ) {
+
+		const uint MATERIAL_PIXELS = 85u;
+		const uint SPECTRAL_BASE_TEXEL = 20u;
+		uint texelOffset = SPECTRAL_BASE_TEXEL + spectralIdx / 4u;
+		uint comp = spectralIdx % 4u;
+		vec4 v = texelFetch1D( materialsTex, materialIndex * MATERIAL_PIXELS + texelOffset );
+		return v[ int( comp ) ];
+
+	}
+
+	float spectralAttenuationMuHero( sampler2D materialsTex, uint materialIndex, float heroWavelength ) {
+
+		const float L0 = 380.0;
+		const float L1 = 780.0;
+		float t = clamp( ( heroWavelength - L0 ) / max( L1 - L0, 1e-6 ), 0.0, 1.0 );
+		float fi = t * 31.0;
+		uint i0 = uint( floor( fi ) );
+		uint i1 = min( i0 + 1u, 31u );
+		float w = fract( fi );
+		float mu0 = readSpectralAttenuationMu( materialsTex, materialIndex, i0 );
+		float mu1 = readSpectralAttenuationMu( materialsTex, materialIndex, i1 );
+		return mix( mu0, mu1, w );
+
+	}
+
+	// Hero-path Beer-Lambert: spectral materials use packed μ(λ); otherwise RGB attenuation + hero projection.
+	float transmissionAttenuationHero(
+		sampler2D materialsTex,
+		float dist,
+		vec3 attColor,
+		float attDist,
+		bool hasSpectral,
+		uint materialIndex,
+		float heroWavelength
+	) {
+
+		if ( ! hasSpectral ) {
+
+			return heroScalarFromRgb( transmissionAttenuation( dist, attColor, attDist ), heroWavelength );
+
+		}
+
+		float muLambda = spectralAttenuationMuHero( materialsTex, materialIndex, heroWavelength );
+		return exp( - muLambda * dist );
+
+	}
 
 	vec3 getHalfVector( vec3 wi, vec3 wo, float eta ) {
 
@@ -5862,8 +5908,9 @@ float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, boo
 	}
 	*/
 
-	// TODO: This is just using a basic cosine-weighted specular distribution with an
-	// incorrect PDF value at the moment. Update it to correctly use a GGX distribution
+	// Transmission / refraction (GGX microfacet BTDF).
+	// PDF follows Walter et al., EGSR07 §4.2 — consistent with half-vector Jacobians
+	// when sampling uses a perturbed normal / half-vector (see commented block above).
 	float transmissionEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, float heroWavelength, inout vec3 color ) {
 
 		color = surf.transmission * surf.color;
@@ -5880,23 +5927,9 @@ float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, boo
 			color *= thinFilmRt.y;
 		}
 
-		// PDF
-		// float F = evaluateFresnelWeight( dot( wo, wh ), surf.eta, surf.f0 );
-		// float F = disneyFresnel( wo, wi, wh, surf.f0, surf.eta, surf.metalness );
-		// if ( F >= 1.0 ) {
-
-		// 	return 0.0;
-
-		// }
-
-		// return 1.0 / ( 1.0 - F );
-
-		// reverted to previous to transmission. The above was causing black pixels
 		float eta = surf.eta;
-		float f0 = surf.f0;
 		float cosTheta = min( wo.z, 1.0 );
-		float sinTheta = sqrt( 1.0 - cosTheta * cosTheta );
-		float reflectance = schlickFresnel( cosTheta, f0 );
+		float sinTheta = sqrt( max( 1.0 - cosTheta * cosTheta, 0.0 ) );
 		bool cannotRefract = eta * sinTheta > 1.0;
 		if ( cannotRefract ) {
 
@@ -5904,15 +5937,28 @@ float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, boo
 
 		}
 
-		return 1.0 / ( 1.0 - reflectance );
+		float filteredRoughness = surf.filteredRoughness;
+		float inner = eta * dot( wi, wh ) + dot( wo, wh );
+		float denom = inner * inner;
+		if ( denom <= 1e-12 ) {
+
+			return 0.0;
+
+		}
+
+		return ggxPDF( wo, wh, filteredRoughness ) / denom;
 
 	}
 
 	vec3 transmissionDirection( vec3 wo, SurfaceRecord surf ) {
 
-		float roughness = surf.filteredRoughness;
+		float filteredRoughness = surf.filteredRoughness;
 		float eta = surf.eta;
-		vec3 halfVector = normalize( vec3( 0.0, 0.0, 1.0 ) + sampleSphere( rand2( 13 ) ) * roughness );
+		vec3 halfVector = ggxDirection(
+			wo,
+			vec2( filteredRoughness ),
+			rand2( 13 )
+		);
 		vec3 lightDirection = refract( normalize( - wo ), halfVector, eta );
 
 		if ( surf.thinFilm ) {
@@ -5947,14 +5993,6 @@ float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, boo
 		return A + B / lam2 + C / lam4;
 	}
 
-	// Sprint 12: Jakob+Hanika spectral reflectance weight at arbitrary hero wavelength.
-	// When the payload carries a scalar hero wavelength (post-restructure), this replaces
-	// the per-channel evalSpectrum calls in dispersionTransmissionDirection.
-	float evalSpectrum( vec3 coeffs, float lambda );
-	float evalSpectrumAtHero( float lambdaNm ) {
-		return evalSpectrum( u_jakobCoeffs, lambdaNm );
-	}
-
 	// ── Sprint 8: Chromatic dispersion via Cauchy formula + Jakob+Hanika rider ──
 	//
 	// evalSpectrum: 6-instruction sigmoid polynomial evaluation.
@@ -5966,6 +6004,13 @@ float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, boo
 	float evalSpectrum( vec3 coeffs, float lambda ) {
 		float x = coeffs.x + coeffs.y * lambda + coeffs.z * lambda * lambda;
 		return 0.5 + x * inversesqrt( 1.0 + x * x ) * 0.5;
+	}
+
+	// Sprint 12: Jakob+Hanika spectral helper (see evalSpectrum). Host may upload u_jakobCoeffs;
+	// primary hero-Wavelength shading uses Cauchy IOR + packed spectral attenuation + CMF accumulation.
+	// evalSpectrumAtHero is retained for optional RGB→spectrum weighting experiments, not core NEE/Beer-Lambert.
+	float evalSpectrumAtHero( float lambdaNm ) {
+		return evalSpectrum( u_jakobCoeffs, lambdaNm );
 	}
 
 	// Sprint 12: dielectric transmission with hero-wavelength Cauchy IOR.
@@ -5983,8 +6028,12 @@ float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, boo
 		bool frontFace = surf.frontFace;
 		float eta = frontFace ? 1.0 / chosenIor : chosenIor;
 
-		float roughness = surf.filteredRoughness;
-		vec3 halfVector = normalize( vec3( 0.0, 0.0, 1.0 ) + sampleSphere( rand2( 13 ) ) * roughness );
+		float filteredRoughness = surf.filteredRoughness;
+		vec3 halfVector = ggxDirection(
+			wo,
+			vec2( filteredRoughness ),
+			rand2( 13 )
+		);
 		vec3 lightDirection = refract( normalize( - wo ), halfVector, eta );
 
 		if ( surf.thinFilm ) {
@@ -6142,7 +6191,7 @@ float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, boo
 
 	}
 
-	float bsdfResult( vec3 worldWo, vec3 worldWi, SurfaceRecord surf, inout vec3 color ) {
+	float bsdfResult( vec3 worldWo, vec3 worldWi, SurfaceRecord surf, float heroWavelength, inout vec3 color ) {
 
 		if ( surf.volumeParticle ) {
 
@@ -6165,7 +6214,7 @@ float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, boo
 		getLobeWeights( wo, wi, wh, clearcoatWo, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight );
 
 		float specularPdf;
-		return bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, 550.0, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, specularPdf, color );
+		return bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, heroWavelength, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, specularPdf, color );
 
 	}
 
@@ -7299,6 +7348,7 @@ bool bvhIntersectFogVolumeHit(
 					// attenuate by medium once we hit the opposite side of the model.
 					// Sprint 12 Gap §5: use hero-wavelength attenuation when spectral data exists.
 					float attenuation = transmissionAttenuationHero(
+						materials,
 						surfaceHit.dist,
 						material.attenuationColor,
 						material.attenuationDistance,
@@ -7512,7 +7562,7 @@ bool bvhIntersectFogVolumeHit(
 
 				// get the material pdf
 				vec3 sampleColor;
-				float lightMaterialPdf = bsdfResult( worldWo, lightRec.direction, surf, sampleColor );
+				float lightMaterialPdf = bsdfResult( worldWo, lightRec.direction, surf, state.wavelength, sampleColor );
 				bool isValidSampleColor = all( greaterThanEqual( sampleColor, vec3( 0.0 ) ) );
 				if ( lightMaterialPdf > 0.0 && isValidSampleColor ) {
 
@@ -7555,7 +7605,7 @@ bool bvhIntersectFogVolumeHit(
 
 				// get the material pdf
 				vec3 sampleColor;
-				float envMaterialPdf = bsdfResult( worldWo, envDirection, surf, sampleColor );
+				float envMaterialPdf = bsdfResult( worldWo, envDirection, surf, state.wavelength, sampleColor );
 				bool isValidSampleColor = all( greaterThanEqual( sampleColor, vec3( 0.0 ) ) );
 				if ( envMaterialPdf > 0.0 && isValidSampleColor ) {
 
@@ -8735,6 +8785,7 @@ bool bvhIntersectFogVolumeHit(
 						if ( ! surf.frontFace ) {
 
 							state.throughput *= transmissionAttenuationHero(
+								materials,
 								surfaceHit.dist,
 								surf.attenuationColor,
 								surf.attenuationDistance,

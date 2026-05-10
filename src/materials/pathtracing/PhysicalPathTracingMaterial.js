@@ -734,6 +734,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						if ( ! surf.frontFace ) {
 
 							state.throughput *= transmissionAttenuationHero(
+								materials,
 								surfaceHit.dist,
 								surf.attenuationColor,
 								surf.attenuationDistance,

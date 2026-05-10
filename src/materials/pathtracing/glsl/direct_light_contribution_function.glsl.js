@@ -44,7 +44,7 @@ export const direct_light_contribution_function = /*glsl*/`
 
 				// get the material pdf
 				vec3 sampleColor;
-				float lightMaterialPdf = bsdfResult( worldWo, lightRec.direction, surf, sampleColor );
+				float lightMaterialPdf = bsdfResult( worldWo, lightRec.direction, surf, state.wavelength, sampleColor );
 				bool isValidSampleColor = all( greaterThanEqual( sampleColor, vec3( 0.0 ) ) );
 				if ( lightMaterialPdf > 0.0 && isValidSampleColor ) {
 
@@ -87,7 +87,7 @@ export const direct_light_contribution_function = /*glsl*/`
 
 				// get the material pdf
 				vec3 sampleColor;
-				float envMaterialPdf = bsdfResult( worldWo, envDirection, surf, sampleColor );
+				float envMaterialPdf = bsdfResult( worldWo, envDirection, surf, state.wavelength, sampleColor );
 				bool isValidSampleColor = all( greaterThanEqual( sampleColor, vec3( 0.0 ) ) );
 				if ( envMaterialPdf > 0.0 && isValidSampleColor ) {
 

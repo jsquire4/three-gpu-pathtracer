@@ -150,6 +150,7 @@ export const attenuate_hit_function = /* glsl */`
 					// attenuate by medium once we hit the opposite side of the model.
 					// Sprint 12 Gap §5: use hero-wavelength attenuation when spectral data exists.
 					float attenuation = transmissionAttenuationHero(
+						materials,
 						surfaceHit.dist,
 						material.attenuationColor,
 						material.attenuationDistance,

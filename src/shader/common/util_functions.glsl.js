@@ -38,9 +38,55 @@ export const util_functions = /* glsl */`
 		return heroScalarFromRgb( rgb, heroWavelength );
 	}
 
-float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, bool hasSpectral, uint materialIndex, float heroWavelength ) {
-	return heroScalarFromRgb( transmissionAttenuation( dist, attColor, attDist ), heroWavelength );
-}
+	// Packed spectral μ(λ) grid: MaterialsTexture.js texels 20..27 (32 floats),
+	// uniform wavelength samples 380..780 nm (matches SPECTRAL_GRID_* in JS).
+	float readSpectralAttenuationMu( sampler2D materialsTex, uint materialIndex, uint spectralIdx ) {
+
+		const uint MATERIAL_PIXELS = 85u;
+		const uint SPECTRAL_BASE_TEXEL = 20u;
+		uint texelOffset = SPECTRAL_BASE_TEXEL + spectralIdx / 4u;
+		uint comp = spectralIdx % 4u;
+		vec4 v = texelFetch1D( materialsTex, materialIndex * MATERIAL_PIXELS + texelOffset );
+		return v[ int( comp ) ];
+
+	}
+
+	float spectralAttenuationMuHero( sampler2D materialsTex, uint materialIndex, float heroWavelength ) {
+
+		const float L0 = 380.0;
+		const float L1 = 780.0;
+		float t = clamp( ( heroWavelength - L0 ) / max( L1 - L0, 1e-6 ), 0.0, 1.0 );
+		float fi = t * 31.0;
+		uint i0 = uint( floor( fi ) );
+		uint i1 = min( i0 + 1u, 31u );
+		float w = fract( fi );
+		float mu0 = readSpectralAttenuationMu( materialsTex, materialIndex, i0 );
+		float mu1 = readSpectralAttenuationMu( materialsTex, materialIndex, i1 );
+		return mix( mu0, mu1, w );
+
+	}
+
+	// Hero-path Beer-Lambert: spectral materials use packed μ(λ); otherwise RGB attenuation + hero projection.
+	float transmissionAttenuationHero(
+		sampler2D materialsTex,
+		float dist,
+		vec3 attColor,
+		float attDist,
+		bool hasSpectral,
+		uint materialIndex,
+		float heroWavelength
+	) {
+
+		if ( ! hasSpectral ) {
+
+			return heroScalarFromRgb( transmissionAttenuation( dist, attColor, attDist ), heroWavelength );
+
+		}
+
+		float muLambda = spectralAttenuationMuHero( materialsTex, materialIndex, heroWavelength );
+		return exp( - muLambda * dist );
+
+	}
 
 	vec3 getHalfVector( vec3 wi, vec3 wo, float eta ) {
 

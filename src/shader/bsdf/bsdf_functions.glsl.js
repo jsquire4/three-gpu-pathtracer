@@ -150,8 +150,9 @@ export const bsdf_functions = /* glsl */`
 	}
 	*/
 
-	// TODO: This is just using a basic cosine-weighted specular distribution with an
-	// incorrect PDF value at the moment. Update it to correctly use a GGX distribution
+	// Transmission / refraction (GGX microfacet BTDF).
+	// PDF follows Walter et al., EGSR07 §4.2 — consistent with half-vector Jacobians
+	// when sampling uses a perturbed normal / half-vector (see commented block above).
 	float transmissionEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, float heroWavelength, inout vec3 color ) {
 
 		color = surf.transmission * surf.color;
@@ -168,23 +169,9 @@ export const bsdf_functions = /* glsl */`
 			color *= thinFilmRt.y;
 		}
 
-		// PDF
-		// float F = evaluateFresnelWeight( dot( wo, wh ), surf.eta, surf.f0 );
-		// float F = disneyFresnel( wo, wi, wh, surf.f0, surf.eta, surf.metalness );
-		// if ( F >= 1.0 ) {
-
-		// 	return 0.0;
-
-		// }
-
-		// return 1.0 / ( 1.0 - F );
-
-		// reverted to previous to transmission. The above was causing black pixels
 		float eta = surf.eta;
-		float f0 = surf.f0;
 		float cosTheta = min( wo.z, 1.0 );
-		float sinTheta = sqrt( 1.0 - cosTheta * cosTheta );
-		float reflectance = schlickFresnel( cosTheta, f0 );
+		float sinTheta = sqrt( max( 1.0 - cosTheta * cosTheta, 0.0 ) );
 		bool cannotRefract = eta * sinTheta > 1.0;
 		if ( cannotRefract ) {
 
@@ -192,15 +179,28 @@ export const bsdf_functions = /* glsl */`
 
 		}
 
-		return 1.0 / ( 1.0 - reflectance );
+		float filteredRoughness = surf.filteredRoughness;
+		float inner = eta * dot( wi, wh ) + dot( wo, wh );
+		float denom = inner * inner;
+		if ( denom <= 1e-12 ) {
+
+			return 0.0;
+
+		}
+
+		return ggxPDF( wo, wh, filteredRoughness ) / denom;
 
 	}
 
 	vec3 transmissionDirection( vec3 wo, SurfaceRecord surf ) {
 
-		float roughness = surf.filteredRoughness;
+		float filteredRoughness = surf.filteredRoughness;
 		float eta = surf.eta;
-		vec3 halfVector = normalize( vec3( 0.0, 0.0, 1.0 ) + sampleSphere( rand2( 13 ) ) * roughness );
+		vec3 halfVector = ggxDirection(
+			wo,
+			vec2( filteredRoughness ),
+			rand2( 13 )
+		);
 		vec3 lightDirection = refract( normalize( - wo ), halfVector, eta );
 
 		if ( surf.thinFilm ) {
@@ -235,14 +235,6 @@ export const bsdf_functions = /* glsl */`
 		return A + B / lam2 + C / lam4;
 	}
 
-	// Sprint 12: Jakob+Hanika spectral reflectance weight at arbitrary hero wavelength.
-	// When the payload carries a scalar hero wavelength (post-restructure), this replaces
-	// the per-channel evalSpectrum calls in dispersionTransmissionDirection.
-	float evalSpectrum( vec3 coeffs, float lambda );
-	float evalSpectrumAtHero( float lambdaNm ) {
-		return evalSpectrum( u_jakobCoeffs, lambdaNm );
-	}
-
 	// ── Sprint 8: Chromatic dispersion via Cauchy formula + Jakob+Hanika rider ──
 	//
 	// evalSpectrum: 6-instruction sigmoid polynomial evaluation.
@@ -254,6 +246,13 @@ export const bsdf_functions = /* glsl */`
 	float evalSpectrum( vec3 coeffs, float lambda ) {
 		float x = coeffs.x + coeffs.y * lambda + coeffs.z * lambda * lambda;
 		return 0.5 + x * inversesqrt( 1.0 + x * x ) * 0.5;
+	}
+
+	// Sprint 12: Jakob+Hanika spectral helper (see evalSpectrum). Host may upload u_jakobCoeffs;
+	// primary hero-Wavelength shading uses Cauchy IOR + packed spectral attenuation + CMF accumulation.
+	// evalSpectrumAtHero is retained for optional RGB→spectrum weighting experiments, not core NEE/Beer-Lambert.
+	float evalSpectrumAtHero( float lambdaNm ) {
+		return evalSpectrum( u_jakobCoeffs, lambdaNm );
 	}
 
 	// Sprint 12: dielectric transmission with hero-wavelength Cauchy IOR.
@@ -271,8 +270,12 @@ export const bsdf_functions = /* glsl */`
 		bool frontFace = surf.frontFace;
 		float eta = frontFace ? 1.0 / chosenIor : chosenIor;
 
-		float roughness = surf.filteredRoughness;
-		vec3 halfVector = normalize( vec3( 0.0, 0.0, 1.0 ) + sampleSphere( rand2( 13 ) ) * roughness );
+		float filteredRoughness = surf.filteredRoughness;
+		vec3 halfVector = ggxDirection(
+			wo,
+			vec2( filteredRoughness ),
+			rand2( 13 )
+		);
 		vec3 lightDirection = refract( normalize( - wo ), halfVector, eta );
 
 		if ( surf.thinFilm ) {
@@ -430,7 +433,7 @@ export const bsdf_functions = /* glsl */`
 
 	}
 
-	float bsdfResult( vec3 worldWo, vec3 worldWi, SurfaceRecord surf, inout vec3 color ) {
+	float bsdfResult( vec3 worldWo, vec3 worldWi, SurfaceRecord surf, float heroWavelength, inout vec3 color ) {
 
 		if ( surf.volumeParticle ) {
 
@@ -453,7 +456,7 @@ export const bsdf_functions = /* glsl */`
 		getLobeWeights( wo, wi, wh, clearcoatWo, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight );
 
 		float specularPdf;
-		return bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, 550.0, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, specularPdf, color );
+		return bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, heroWavelength, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, specularPdf, color );
 
 	}
 
