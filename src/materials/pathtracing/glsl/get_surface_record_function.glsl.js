@@ -268,6 +268,7 @@ export const get_surface_record_function = /* glsl */`
 		bool hasFaceLayer = frontFaceHit ? material.hasFrontLayer : material.hasBackLayer;
 		vec3 layerTransmission = frontFaceHit ? material.frontLayerTransmission : material.backLayerTransmission;
 		float layerRoughness = frontFaceHit ? material.frontLayerRoughness : material.backLayerRoughness;
+		layerTransmission = clamp( layerTransmission, vec3( 0.0 ), vec3( 1.0 ) );
 		if ( hasFaceLayer && layerRoughness >= 0.0 ) {
 			roughness = clamp( layerRoughness, 0.0, 1.0 );
 		}

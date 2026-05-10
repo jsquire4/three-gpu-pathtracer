@@ -31,6 +31,16 @@ const argv = yargs( process.argv.slice( 2 ) )
 		type: 'boolean',
 		default: false
 	} )
+	.option( 'base-url', {
+		describe: 'Base URL for the viewer test page.',
+		type: 'string',
+		default: 'http://localhost:5173',
+	} )
+	.option( 'start-server', {
+		describe: 'Start the local dev server before capturing.',
+		type: 'boolean',
+		default: false,
+	} )
 	.argv;
 
 ( async () => {
@@ -40,8 +50,14 @@ const argv = yargs( process.argv.slice( 2 ) )
 	const folderPath = path.resolve( process.cwd(), argv[ 'output-path' ] );
 	console.log( `Saving to "${ folderPath }"\n` );
 
-	console.log( 'Running test page service' );
-	exec( 'npm run start' );
+	if ( argv[ 'start-server' ] ) {
+
+		console.log( 'Running test page service' );
+		exec( 'npm run start' );
+
+	}
+
+	await waitForViewer( argv[ 'base-url' ] );
 
 	fs.mkdirSync( folderPath, { recursive: true } );
 
@@ -107,7 +123,7 @@ async function saveScreenshot( scenario, targetFolder ) {
 
 	const page = await browser.newPage();
 
-	await page.goto( `http://localhost:1234/viewerTest.html?hideUI=true&scale=1&tiles=4&samples=${ SAMPLES }#${ name }` );
+	await page.goto( `${ argv[ 'base-url' ] }/viewerTest.html?hideUI=true&scale=1&tiles=4&samples=${ SAMPLES }#${ name }` );
 
 	try {
 
@@ -161,5 +177,36 @@ async function saveScreenshot( scenario, targetFolder ) {
 	fs.writeFileSync( `${ targetFolder }/${ name }.${ ext }`, buffer );
 
 	await browser.close();
+
+}
+
+async function waitForViewer( baseUrl ) {
+
+	const targetUrl = `${ baseUrl }/viewerTest.html`;
+	const timeoutMs = 30000;
+	const pollMs = 500;
+	const started = Date.now();
+	while ( Date.now() - started < timeoutMs ) {
+
+		try {
+
+			const res = await fetch( targetUrl, { method: 'GET' } );
+			if ( res.ok ) {
+
+				return;
+
+			}
+
+		} catch ( _err ) {
+
+			// Retry until timeout.
+
+		}
+
+		await new Promise( resolve => setTimeout( resolve, pollMs ) );
+
+	}
+
+	throw new Error( `Viewer endpoint did not become ready: ${ targetUrl }` );
 
 }

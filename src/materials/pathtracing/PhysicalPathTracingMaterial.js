@@ -601,31 +601,93 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						#endif
 
 						// RFE-05 strategy behavior hook:
-						// strategy 1 => manifold-nee approximation for sharp refractive caustics.
-						// strategy 2 => photon-map-like approximation for robust diffuse caustic fill.
+						// strategy 1 => deterministic refractive-chain connection walk.
+						// strategy 2 => deterministic cone-traced caustic density estimate.
 						if ( uCausticStrategy > 0 && surf.transmission > 0.0 ) {
 							if ( uCausticStrategy == 1 ) {
-								float etaM = surf.frontFace ? ( 1.0 / max( surf.ior, 1.0 ) ) : max( surf.ior, 1.0 );
-								vec3 manifoldDir = refract( ray.direction, surf.normal, etaM );
-								if ( length( manifoldDir ) > 0.0 ) {
-									vec3 md = normalize( manifoldDir );
-									Ray mRay;
-									mRay.origin = hitPoint;
-									mRay.direction = md;
-									SurfaceHit mHit;
-									int mHitType = traceScene( mRay, state.fogMaterial, mHit );
-									if ( mHitType == NO_HIT ) {
-										float iterBoost = clamp( uMneeMaxIterations / 8.0, 0.25, 2.0 );
-										float chainBoost = clamp( uMneeMaxChainLength / 3.0, 0.25, 2.0 );
-										float focus = pow( max( dot( md, - ray.direction ), 0.0 ), 16.0 );
-										float causticGain = 0.06 * iterBoost * chainBoost * focus;
-										gl_FragColor.rgb += throughputRgb * surf.color * causticGain;
+								// Skip manifold mode on rough refractive surfaces: the fixed-step
+								// walk is intended for near-specular interfaces.
+								if ( surf.filteredRoughness < 0.12 ) {
+									float etaM = surf.frontFace ? ( 1.0 / max( surf.ior, 1.0 ) ) : max( surf.ior, 1.0 );
+									vec3 walkDir = refract( ray.direction, surf.normal, etaM );
+									if ( length( walkDir ) > 0.0 ) {
+										walkDir = normalize( walkDir );
+										vec3 walkOrigin = hitPoint;
+										int maxWalkIter = int( clamp( floor( uMneeMaxIterations + 0.5 ), 1.0, 16.0 ) );
+										int maxChain = int( clamp( floor( uMneeMaxChainLength + 0.5 ), 1.0, 8.0 ) );
+										int traversedChain = 0;
+										bool reachedLight = false;
+										float chainAttenuation = 1.0;
+										for ( int walkIter = 0; walkIter < 16; walkIter ++ ) {
+											if ( walkIter >= maxWalkIter || traversedChain >= maxChain ) break;
+											Ray walkRay;
+											walkRay.origin = walkOrigin;
+											walkRay.direction = walkDir;
+											SurfaceHit walkHit;
+											int walkHitType = traceScene( walkRay, state.fogMaterial, walkHit );
+											if ( walkHitType == NO_HIT ) {
+												reachedLight = true;
+												break;
+											}
+											uint walkMaterialIndex = uTexelFetch1D( materialIndexAttribute, walkHit.faceIndices.x ).r;
+											Material walkMaterial = readMaterialInfo( materials, walkMaterialIndex );
+											if ( walkMaterial.transmission <= 0.0 ) {
+												break;
+											}
+											vec3 walkHitPoint = stepRayOrigin( walkOrigin, walkDir, walkHit.faceNormal, walkHit.dist );
+											float etaWalk = walkHit.side > 0.0
+												? ( 1.0 / max( walkMaterial.ior, 1.0 ) )
+												: max( walkMaterial.ior, 1.0 );
+											vec3 nextDir = refract( walkDir, walkHit.faceNormal, etaWalk );
+											if ( length( nextDir ) <= 1e-5 ) {
+												break;
+											}
+											walkOrigin = walkHitPoint;
+											walkDir = normalize( nextDir );
+											chainAttenuation *= clamp( walkMaterial.transmission, 0.0, 1.0 );
+											traversedChain ++;
+										}
+										if ( reachedLight ) {
+											float focus = pow( max( dot( walkDir, - ray.direction ), 0.0 ), 10.0 );
+											float chainNorm = 1.0 / max( float( traversedChain + 1 ), 1.0 );
+											float manifoldWeight = focus * chainNorm * chainAttenuation;
+											gl_FragColor.rgb += throughputRgb * surf.color * manifoldWeight;
+										}
 									}
 								}
 							} else if ( uCausticStrategy == 2 ) {
-								float spread = 1.0 / max( 1.0, uMneeMaxIterations + uMneeMaxChainLength );
-								float gain = 0.04 + 0.12 * spread;
-								gl_FragColor.rgb += throughputRgb * surf.color * gain * ( 1.0 - surf.filteredRoughness );
+								// Photon-density style estimate: cast a deterministic refracted cone
+								// and estimate visible light density with an inverse-distance kernel.
+								float etaP = surf.frontFace ? ( 1.0 / max( surf.ior, 1.0 ) ) : max( surf.ior, 1.0 );
+								vec3 refrDir = refract( ray.direction, surf.normal, etaP );
+								if ( length( refrDir ) > 0.0 ) {
+									refrDir = normalize( refrDir );
+									vec3 tangentA = normalize( abs( refrDir.x ) > 0.5 ? cross( refrDir, vec3( 0.0, 1.0, 0.0 ) ) : cross( refrDir, vec3( 1.0, 0.0, 0.0 ) ) );
+									vec3 tangentB = normalize( cross( refrDir, tangentA ) );
+									float coneRadius = mix( 0.01, 0.12, clamp( surf.filteredRoughness, 0.0, 1.0 ) );
+									float photonAccum = 0.0;
+									const int PHOTON_SAMPLES = 8;
+									for ( int p = 0; p < PHOTON_SAMPLES; p ++ ) {
+										float u = ( float( p ) + 0.5 ) / float( PHOTON_SAMPLES );
+										float v = rand( 42 + p );
+										float r = coneRadius * sqrt( u );
+										float phi = 6.28318530718 * v;
+										vec3 coneDir = normalize( refrDir + ( cos( phi ) * r ) * tangentA + ( sin( phi ) * r ) * tangentB );
+										Ray photonRay;
+										photonRay.origin = hitPoint;
+										photonRay.direction = coneDir;
+										SurfaceHit photonHit;
+										int photonHitType = traceScene( photonRay, state.fogMaterial, photonHit );
+										if ( photonHitType == NO_HIT ) {
+											photonAccum += 1.0;
+										} else {
+											float d = max( photonHit.dist, 1e-3 );
+											photonAccum += 1.0 / ( 1.0 + d * d );
+										}
+									}
+									float density = photonAccum / float( PHOTON_SAMPLES );
+									gl_FragColor.rgb += throughputRgb * surf.color * density * surf.transmission;
+								}
 							}
 						}
 

@@ -12,12 +12,8 @@ f90    : Amount of light reflected at grazing angles
 export const bsdf_functions = /* glsl */`
 
 	// Sprint 7: TRANSLUCENT material flag bit for SSS single-scatter path.
-	// Bit 4 of a hypothetical flags field; gated by u_sssSigmaT > 0 at the
-	// call site because the material struct does not yet carry per-material
-	// flag bits (they are packed into sample 14 in MaterialsTexture.js and
-	// the GLSL readMaterialInfo does not expose a raw flags word).
-	// TODO(sprint-7-flags): extend material_struct.glsl.js with a flags uint
-	// and pack TRANSLUCENT_BIT into MaterialsTexture.js sample 14.
+	// This is packed in MaterialsTexture sample 14 and unpacked into material.flags
+	// by material_struct.glsl.js::readMaterialInfo().
 	const uint TRANSLUCENT_BIT = 0x10u;  // bit 4
 
 	// diffuse
@@ -206,10 +202,6 @@ export const bsdf_functions = /* glsl */`
 	// New uniforms: iorCauchyA, iorCauchyB, iorCauchyC (see PhysicalPathTracingMaterial.js).
 	// Sprint 8 uniforms (u_ior0, u_dispersionStrength) are kept for backward compatibility.
 	//
-	// TODO(sprint-12-payload): once the ray payload is restructured from vec3 throughput to
-	// (float wavelength, float throughput), replace the Sprint 8 per-channel gate in
-	// dispersionTransmissionDirection() with a call to cauchyIORatLambda(heroWavelength, A, B, C).
-	// See SPRINT_12_GAPS.md §1 for the full payload restructure plan.
 	float cauchyIORatLambda( float lambdaNm, float A, float B, float C ) {
 		float lambdaUm = lambdaNm * 0.001;  // nm → µm
 		float lam2 = lambdaUm * lambdaUm;
@@ -239,50 +231,16 @@ export const bsdf_functions = /* glsl */`
 		return 0.5 + x * inversesqrt( 1.0 + x * x ) * 0.5;
 	}
 
-	// Sprint 8: dielectric transmission with per-channel IOR via Cauchy formula.
-	// Stochastically selects one of three wavelengths {700, 550, 450} nm,
-	// weights that channel by 3× (importance-sampling the 1/3-probability choice),
-	// and refracts along the wavelength-specific direction.
-	//
-	// Gate: only active when u_dispersionStrength > 1e-4.  Falls back to the
-	// single-IOR path (transmissionDirection) when dispersion is disabled.
-	// This ensures non-bevel glass pays zero per-channel cost.
-	//
-	// Per plan/sprint-8-pt-fork-patch.md §1-2.
-	vec3 dispersionTransmissionDirection( vec3 wo, SurfaceRecord surf, inout vec3 channelMask ) {
+	// Sprint 12: dielectric transmission with hero-wavelength Cauchy IOR.
+	// Uses global Cauchy coefficients (iorCauchyA/B/C) with per-material base IOR
+	// preserved by applying only the spectral delta from iorCauchyA.
+	vec3 dispersionTransmissionDirection( vec3 wo, SurfaceRecord surf, float heroWavelength ) {
 
-		const float LAMBDA_R = 700.0;  // nm — red channel
-		const float LAMBDA_G = 550.0;  // nm — green channel
-		const float LAMBDA_B = 450.0;  // nm — blue channel
+		float iorAtHero = cauchyIORatLambda( heroWavelength, iorCauchyA, iorCauchyB, iorCauchyC );
+		float iorDelta = iorAtHero - iorCauchyA;
+		float chosenIor = max( 1.0, surf.ior + iorDelta );
 
-		// Per-channel spectral weight from Jakob+Hanika polynomial.
-		float specR = evalSpectrum( u_jakobCoeffs, LAMBDA_R );
-		float specG = evalSpectrum( u_jakobCoeffs, LAMBDA_G );
-		float specB = evalSpectrum( u_jakobCoeffs, LAMBDA_B );
-
-		// Per-channel IOR from Cauchy formula.
-		// u_dispersionStrength is the Cauchy B coefficient in nm² scale.
-		// u_ior0 is the base IOR at 589.3 nm.
-		float iorR = u_ior0 + u_dispersionStrength * specR / ( LAMBDA_R * LAMBDA_R );
-		float iorG = u_ior0 + u_dispersionStrength * specG / ( LAMBDA_G * LAMBDA_G );
-		float iorB = u_ior0 + u_dispersionStrength * specB / ( LAMBDA_B * LAMBDA_B );
-
-		// Stochastic wavelength selection: choose one of three channels (1/3 each).
-		// Weight the chosen channel by 3× to maintain unbiased expectation.
-		float choiceRand = rand( 23 );
-		float chosenIor;
-		if ( choiceRand < 1.0 / 3.0 ) {
-			chosenIor = iorR;
-			channelMask = vec3( 3.0, 0.0, 0.0 );
-		} else if ( choiceRand < 2.0 / 3.0 ) {
-			chosenIor = iorG;
-			channelMask = vec3( 0.0, 3.0, 0.0 );
-		} else {
-			chosenIor = iorB;
-			channelMask = vec3( 0.0, 0.0, 3.0 );
-		}
-
-		// Refract using the chosen per-wavelength IOR (front-face: air→glass = 1/ior).
+		// Refract using hero-wavelength IOR (front-face: air→glass = 1/ior).
 		bool frontFace = surf.frontFace;
 		float eta = frontFace ? 1.0 / chosenIor : chosenIor;
 
@@ -477,7 +435,12 @@ export const bsdf_functions = /* glsl */`
 	// The scatter position is sampled from an exponential distribution along
 	// the refracted direction; the scattered direction is sampled from HG.
 	// Mirrors @vitrum/shared-samplers/src/hgPhase.ts::sampleHG.
-	ScatterRecord sssSample( vec3 worldWo, SurfaceRecord surf ) {
+	float activeLayerWeight( SurfaceRecord surf, float heroWavelength ) {
+		if ( ! surf.hasActiveLayer ) return 1.0;
+		return heroScalarFromRgb( surf.activeLayerTransmission, heroWavelength );
+	}
+
+	ScatterRecord sssSample( vec3 worldWo, SurfaceRecord surf, float heroWavelength ) {
 
 		float tScatter = sampleExponential( rand( 17 ), u_sssSigmaT, 1e6 );
 		float beerLambert = exp( - u_sssSigmaT * tScatter );
@@ -489,12 +452,12 @@ export const bsdf_functions = /* glsl */`
 		sssRec.pdf = hg_phase( dot( rd, scatterDir ), u_sssAnisotropyG );
 		sssRec.specularPdf = 0.0;
 		sssRec.direction = scatterDir;
-		sssRec.color = u_sssAlbedo * beerLambert;
+		sssRec.throughput = heroScalarFromRgb( u_sssAlbedo * beerLambert, heroWavelength );
 		return sssRec;
 
 	}
 
-	ScatterRecord bsdfSample( vec3 worldWo, SurfaceRecord surf ) {
+	ScatterRecord bsdfSample( vec3 worldWo, SurfaceRecord surf, float heroWavelength ) {
 
 		if ( surf.volumeParticle ) {
 
@@ -502,7 +465,7 @@ export const bsdf_functions = /* glsl */`
 			sampleRec.specularPdf = 0.0;
 			sampleRec.pdf = 1.0 / ( 4.0 * PI );
 			sampleRec.direction = sampleSphere( rand2( 16 ) );
-			sampleRec.color = surf.color / ( 4.0 * PI );
+			sampleRec.throughput = heroScalarFromRgb( surf.color / ( 4.0 * PI ), heroWavelength );
 			return sampleRec;
 
 		}
@@ -566,16 +529,18 @@ export const bsdf_functions = /* glsl */`
 
 		} else if ( r <= cdf[2] ) { // transmission / refraction
 
-			// Sprint 8: per-channel IOR via Cauchy formula when dispersion is enabled.
-			// Gate: u_dispersionStrength > 1e-4 (non-bevel glass takes the fast path).
-			if ( u_dispersionStrength > 1e-4 ) {
-				vec3 channelMask = vec3( 1.0 );
-				wi = dispersionTransmissionDirection( wo, surf, channelMask );
+			// Sprint 12 hero-wavelength dispersion path.
+			// Fast path: if material or global Cauchy dispersion is effectively disabled,
+			// use the classic single-IOR transmission direction.
+			bool materialDispersionEnabled = surf.dispersionStrength > 1e-5;
+			bool cauchyEnabled = abs( iorCauchyB ) > 1e-8 || abs( iorCauchyC ) > 1e-8;
+			if ( materialDispersionEnabled && cauchyEnabled ) {
+				wi = dispersionTransmissionDirection( wo, surf, heroWavelength );
 				clearcoatWi = normalize( clearcoatInvBasis * normalize( normalBasis * wi ) );
 				ScatterRecord dispResult;
-				dispResult.pdf = bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, dispResult.specularPdf, dispResult.color );
-				// Apply the 3× channel weight from stochastic wavelength selection.
-				dispResult.color *= channelMask;
+				vec3 dispColor;
+				dispResult.pdf = bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, dispResult.specularPdf, dispColor );
+				dispResult.throughput = heroScalarFromRgb( dispColor, heroWavelength );
 				dispResult.direction = normalize( surf.normalBasis * wi );
 				return dispResult;
 			} else {
@@ -591,7 +556,9 @@ export const bsdf_functions = /* glsl */`
 		}
 
 		ScatterRecord result;
-		result.pdf = bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, result.specularPdf, result.color );
+		vec3 resultColor;
+		result.pdf = bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, result.specularPdf, resultColor );
+		result.throughput = heroScalarFromRgb( resultColor, heroWavelength );
 		result.direction = normalize( surf.normalBasis * wi );
 
 		return result;

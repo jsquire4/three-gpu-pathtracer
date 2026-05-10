@@ -68,8 +68,10 @@
     "build-examples": "vite build --config ./vite.config.js",
     "update-screenshots": "node ./scripts/push-screenshots.js",
     "screenshot-diff": "node ./scripts/regression-test.js",
+    "shader-smoke": "node ./scripts/shader-smoke-check.js",
+    "check-caustic-strategy": "node ./scripts/check-caustic-strategy-regression.js",
     "build": "rollup -c",
-    "lint": "eslint \"./src/**/*.{js,ts}\" \"./example/*.js\" && tsc --noEmit",
+    "lint": "eslint \"./src/**/*.{js,ts}\" \"./example/*.js\" && tsc --noEmit && npm run shader-smoke",
     "prepublishOnly": "npm run build"
   },
   "repository": {

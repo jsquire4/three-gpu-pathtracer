@@ -2,7 +2,7 @@ import { DataTexture, RGBAFormat, ClampToEdgeWrapping, FloatType, FrontSide, Bac
 import { getTextureHash } from '../core/utils/sceneUpdateUtils.js';
 import { bufferToHash } from '../utils/bufferToHash.js';
 
-const MATERIAL_PIXELS = 76;
+export const MATERIAL_PIXELS = 76;
 const MATERIAL_STRIDE = MATERIAL_PIXELS * 4;
 const TRANSLUCENT_BIT = 1 << 4;
 const FRAUNHOFER_C_NM = 656.3;

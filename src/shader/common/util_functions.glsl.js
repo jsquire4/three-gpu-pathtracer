@@ -34,6 +34,10 @@ export const util_functions = /* glsl */`
 		return max( dot( rgb, vec3( tR, tG, tB ) ), 0.0 );
 	}
 
+	float heroWeightFromRgb( vec3 rgb, float heroWavelength ) {
+		return heroScalarFromRgb( rgb, heroWavelength );
+	}
+
 	float sampleMaterialSpectralMu( uint materialIndex, float heroWavelength ) {
 		const uint MATERIAL_PIXELS = 76u;
 		const uint SPECTRAL_SAMPLE_OFFSET = 20u;
