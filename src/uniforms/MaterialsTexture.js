@@ -2,8 +2,41 @@ import { DataTexture, RGBAFormat, ClampToEdgeWrapping, FloatType, FrontSide, Bac
 import { getTextureHash } from '../core/utils/sceneUpdateUtils.js';
 import { bufferToHash } from '../utils/bufferToHash.js';
 
-export const MATERIAL_PIXELS = 47;
+const MATERIAL_PIXELS = 76;
 const MATERIAL_STRIDE = MATERIAL_PIXELS * 4;
+const TRANSLUCENT_BIT = 1 << 4;
+const FRAUNHOFER_C_NM = 656.3;
+const FRAUNHOFER_F_NM = 486.1;
+const SPECTRAL_GRID_SAMPLE_COUNT = 32;
+const SPECTRAL_GRID_START_NM = 380.0;
+const SPECTRAL_GRID_END_NM = 780.0;
+
+function dispersionStrengthFromAbbe( ior, abbe ) {
+
+	if ( abbe <= 0 || ior <= 1 ) return 0;
+	const denom = 1 / ( FRAUNHOFER_F_NM * FRAUNHOFER_F_NM ) - 1 / ( FRAUNHOFER_C_NM * FRAUNHOFER_C_NM );
+	if ( Math.abs( denom ) < 1e-12 ) return 0;
+	return Math.max( 0, ( ior - 1 ) / ( abbe * denom ) );
+
+}
+
+function sampleSpectralCurve( curve, lambdaNm ) {
+
+	if ( ! curve || typeof curve !== 'object' ) return 0.0;
+	const values = curve.values;
+	if ( ! values || typeof values.length !== 'number' || values.length < 2 ) return 0.0;
+	const lambdaStart = Number.isFinite( curve.wavelengthStart ) ? curve.wavelengthStart : 380.0;
+	const lambdaEnd = Number.isFinite( curve.wavelengthEnd ) ? curve.wavelengthEnd : 780.0;
+	const denom = Math.max( lambdaEnd - lambdaStart, 1e-6 );
+	const t = Math.min( 1.0, Math.max( 0.0, ( lambdaNm - lambdaStart ) / denom ) );
+	const f = t * ( values.length - 1 );
+	const i0 = Math.floor( f );
+	const i1 = Math.min( i0 + 1, values.length - 1 );
+	const a = Number( values[ i0 ] ?? 0.0 );
+	const b = Number( values[ i1 ] ?? a );
+	return a + ( b - a ) * ( f - i0 );
+
+}
 
 class MaterialFeatures {
 
@@ -380,9 +413,128 @@ export class MaterialsTexture extends DataTexture {
 			floatArray[ index ++ ] = Number( getField( m, 'matte', false ) ); // matte
 			floatArray[ index ++ ] = Number( getField( m, 'castShadow', true ) ); // shadow
 			floatArray[ index ++ ] = Number( m.vertexColors ) | ( Number( m.flatShading ) << 1 ); // vertexColors & flatShading
-			floatArray[ index ++ ] = Number( m.transparent ); // transparent
+			let flags = Number( m.transparent );
+			// Sprint 7 follow-up: mark intrinsically scattering/translucent materials.
+			if ( Number( getField( m.userData ?? {}, 'vitrumScatteringCoefficient', 0.0 ) ) > 0.0 ) {
 
-			// map transform 15
+				flags |= TRANSLUCENT_BIT;
+
+			}
+
+			floatArray[ index ++ ] = flags;
+
+			// sample 15 (Vitrum per-material scalar drives)
+			const scatteringCoeff = Number( getField( m.userData ?? {}, 'vitrumScatteringCoefficient', 0.0 ) );
+			const scatteringAnisotropy = Number( getField( m.userData ?? {}, 'vitrumScatteringAnisotropy', 0.0 ) );
+			const dispersionAbbe = Number( getField( m.userData ?? {}, 'vitrumDispersionAbbeNumber', 0.0 ) );
+			const dispersionStrength = dispersionStrengthFromAbbe( Number( getField( m, 'ior', 1.5 ) ), dispersionAbbe );
+			const thinFilmStack = getField( m.userData ?? {}, 'vitrumThinFilmStack', null );
+			const thinFilmLayers = thinFilmStack && Array.isArray( thinFilmStack.layers ) ? thinFilmStack.layers : [];
+			const thinFilmLayerCount = Math.min( thinFilmLayers.length, 35 );
+			const thinFilmEnabled = thinFilmLayerCount > 0 ? 1.0 : 0.0;
+			floatArray[ index ++ ] = scatteringCoeff;
+			floatArray[ index ++ ] = scatteringAnisotropy;
+			floatArray[ index ++ ] = dispersionStrength;
+			floatArray[ index ++ ] = thinFilmEnabled;
+
+			// sample 16 (Vitrum per-material SSS albedo)
+			const scatterAlbedo = getField( m.userData ?? {}, 'vitrumScatteringCoefficientRGB', null );
+			if ( Array.isArray( scatterAlbedo ) && scatterAlbedo.length === 3 ) {
+
+				floatArray[ index ++ ] = Number( scatterAlbedo[ 0 ] );
+				floatArray[ index ++ ] = Number( scatterAlbedo[ 1 ] );
+				floatArray[ index ++ ] = Number( scatterAlbedo[ 2 ] );
+
+			} else {
+
+				floatArray[ index ++ ] = 0.9;
+				floatArray[ index ++ ] = 0.9;
+				floatArray[ index ++ ] = 0.9;
+
+			}
+
+			floatArray[ index ++ ] = thinFilmLayerCount;
+
+			// sample 17 (feature flags only)
+			const spectralCurve = getField( m.userData ?? {}, 'vitrumSpectralAttenuation', null );
+			const frontLayer = getField( m.userData ?? {}, 'vitrumFrontLayer', null );
+			const backLayer = getField( m.userData ?? {}, 'vitrumBackLayer', null );
+			const hasSpectral = spectralCurve && typeof spectralCurve === 'object';
+			const hasFrontLayer = frontLayer && typeof frontLayer === 'object';
+			const hasBackLayer = backLayer && typeof backLayer === 'object';
+			const packedFeatureFlags =
+				( hasSpectral ? 1 : 0 ) |
+				( hasFrontLayer ? 2 : 0 ) |
+				( hasBackLayer ? 4 : 0 );
+			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = packedFeatureFlags;
+
+			// sample 18 (front-layer transmission + optional roughness override)
+			const frontTx = hasFrontLayer && Array.isArray( frontLayer.transmission ) && frontLayer.transmission.length === 3
+				? frontLayer.transmission : [ 1.0, 1.0, 1.0 ];
+			const frontRoughness = hasFrontLayer && Number.isFinite( frontLayer.roughness )
+				? Number( frontLayer.roughness ) : - 1.0;
+			floatArray[ index ++ ] = Number( frontTx[ 0 ] );
+			floatArray[ index ++ ] = Number( frontTx[ 1 ] );
+			floatArray[ index ++ ] = Number( frontTx[ 2 ] );
+			floatArray[ index ++ ] = frontRoughness;
+
+			// sample 19 (back-layer transmission + optional roughness override)
+			const backTx = hasBackLayer && Array.isArray( backLayer.transmission ) && backLayer.transmission.length === 3
+				? backLayer.transmission : [ 1.0, 1.0, 1.0 ];
+			const backRoughness = hasBackLayer && Number.isFinite( backLayer.roughness )
+				? Number( backLayer.roughness ) : - 1.0;
+			floatArray[ index ++ ] = Number( backTx[ 0 ] );
+			floatArray[ index ++ ] = Number( backTx[ 1 ] );
+			floatArray[ index ++ ] = Number( backTx[ 2 ] );
+			floatArray[ index ++ ] = backRoughness;
+
+			// samples 20..27 (32 floats): uniform-grid spectral attenuation μ(λ)
+			// Grid: 380..780 nm inclusive at 32 samples.
+			const spectralDenom = Math.max( SPECTRAL_GRID_SAMPLE_COUNT - 1, 1 );
+			for ( let spectralIdx = 0; spectralIdx < SPECTRAL_GRID_SAMPLE_COUNT; spectralIdx ++ ) {
+
+				if ( hasSpectral ) {
+
+					const t = spectralIdx / spectralDenom;
+					const lambdaNm = SPECTRAL_GRID_START_NM + t * ( SPECTRAL_GRID_END_NM - SPECTRAL_GRID_START_NM );
+					floatArray[ index ++ ] = sampleSpectralCurve( spectralCurve, lambdaNm );
+
+				} else {
+
+					floatArray[ index ++ ] = 0.0;
+
+				}
+
+			}
+
+			// samples 28..45 (70 floats): per-material thin-film layer payload
+			// layout per layer: [ior, thicknessNm]
+			const THIN_FILM_LAYER_LIMIT = 35;
+			for ( let layerIdx = 0; layerIdx < THIN_FILM_LAYER_LIMIT; layerIdx ++ ) {
+
+				if ( layerIdx < thinFilmLayerCount ) {
+
+					const layer = thinFilmLayers[ layerIdx ];
+					floatArray[ index ++ ] = Number( getField( layer ?? {}, 'ior', 1.0 ) );
+					floatArray[ index ++ ] = Number( getField( layer ?? {}, 'thicknessNm', 0.0 ) );
+
+				} else {
+
+					floatArray[ index ++ ] = 0.0;
+					floatArray[ index ++ ] = 0.0;
+
+				}
+
+			}
+
+			// pad the final 2 floats of sample 45
+			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = 0.0;
+
+			// map transform 46
 			index += writeTextureMatrixToArray( m, 'map', floatArray, index );
 
 			// metalnessMap transform 17
@@ -426,9 +578,6 @@ export class MaterialsTexture extends DataTexture {
 
 			// specularIntensityMap transform 43
 			index += writeTextureMatrixToArray( m, 'specularIntensityMap', floatArray, index );
-
-			// alphaMap transform 45
-			index += writeTextureMatrixToArray( m, 'alphaMap', floatArray, index );
 
 		}
 

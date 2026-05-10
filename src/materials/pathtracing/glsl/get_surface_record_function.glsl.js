@@ -4,7 +4,7 @@ export const get_surface_record_function = /* glsl */`
 	#define SKIP_SURFACE 0
 	#define HIT_SURFACE 1
 	int getSurfaceRecord(
-		Material material, SurfaceHit surfaceHit, sampler2DArray attributesArray,
+		Material material, uint materialIndex, SurfaceHit surfaceHit, sampler2DArray attributesArray,
 		float accumulatedRoughness,
 		inout SurfaceRecord surf
 	) {
@@ -48,8 +48,7 @@ export const get_surface_record_function = /* glsl */`
 		// alphaMap
 		if ( material.alphaMap != - 1 ) {
 
-			vec3 uvPrime = material.alphaMapTransform * vec3( uv, 1 );
-			albedo.a *= texture2D( textures, vec3( uvPrime.xy, material.alphaMap ) ).x;
+			albedo.a *= texture2D( textures, vec3( uv, material.alphaMap ) ).x;
 
 		}
 
@@ -264,6 +263,15 @@ export const get_surface_record_function = /* glsl */`
 
 		}
 
+		// frontFace is used to determine transmissive properties and per-face layer selection.
+		bool frontFaceHit = surfaceHit.side == 1.0 || transmission == 0.0;
+		bool hasFaceLayer = frontFaceHit ? material.hasFrontLayer : material.hasBackLayer;
+		vec3 layerTransmission = frontFaceHit ? material.frontLayerTransmission : material.backLayerTransmission;
+		float layerRoughness = frontFaceHit ? material.frontLayerRoughness : material.backLayerRoughness;
+		if ( hasFaceLayer && layerRoughness >= 0.0 ) {
+			roughness = clamp( layerRoughness, 0.0, 1.0 );
+		}
+
 		surf.volumeParticle = false;
 
 		surf.faceNormal = surfaceHit.faceNormal;
@@ -276,6 +284,17 @@ export const get_surface_record_function = /* glsl */`
 		surf.ior = material.ior;
 		surf.transmission = transmission;
 		surf.thinFilm = material.thinFilm;
+		surf.thinFilmEnabled = material.thinFilmEnabled;
+		surf.thinFilmLayerCount = material.thinFilmLayerCount;
+		surf.dispersionStrength = material.dispersionStrength;
+		surf.sssSigmaT = material.sssSigmaT;
+		surf.sssAnisotropyG = material.sssAnisotropyG;
+		surf.sssAlbedo = material.sssAlbedo;
+		surf.hasSpectralAttenuation = material.hasSpectralAttenuation;
+		surf.activeLayerTransmission = hasFaceLayer ? layerTransmission : vec3( 1.0 );
+		surf.activeLayerRoughness = layerRoughness;
+		surf.hasActiveLayer = hasFaceLayer;
+		surf.materialIndex = materialIndex;
 		surf.attenuationColor = material.attenuationColor;
 		surf.attenuationDistance = material.attenuationDistance;
 
@@ -301,7 +320,7 @@ export const get_surface_record_function = /* glsl */`
 
 		// frontFace is used to determine transmissive properties and PDF. If no transmission is used
 		// then we can just always assume this is a front face.
-		surf.frontFace = surfaceHit.side == 1.0 || transmission == 0.0;
+		surf.frontFace = frontFaceHit;
 		surf.eta = material.thinFilm || surf.frontFace ? 1.0 / material.ior : material.ior;
 		surf.f0 = iorRatioToF0( surf.eta );
 

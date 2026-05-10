@@ -27,6 +27,17 @@ export const surface_record_struct = /* glsl */`
 		float ior;
 		float transmission;
 		bool thinFilm;
+		float thinFilmEnabled;
+		float thinFilmLayerCount;
+		float dispersionStrength;
+		float sssSigmaT;
+		float sssAnisotropyG;
+		vec3 sssAlbedo;
+		bool hasSpectralAttenuation;
+		vec3 activeLayerTransmission;
+		float activeLayerRoughness;
+		bool hasActiveLayer;
+		uint materialIndex;
 		vec3 attenuationColor;
 		float attenuationDistance;
 
@@ -57,7 +68,7 @@ export const surface_record_struct = /* glsl */`
 		float specularPdf;
 		float pdf;
 		vec3 direction;
-		vec3 color;
+		float throughput;
 	};
 
 `;
