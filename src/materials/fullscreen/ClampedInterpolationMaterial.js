@@ -93,19 +93,49 @@ export class ClampedInterpolationMaterial extends ShaderMaterial {
 					vec2 pxNext = clamp( pxOffset + pxCurr, vec2( 0.0 ), size - 1.0 );
 					vec2 alpha = abs( pxFrac );
 
-					vec4 p1 = mix(
-						clampedTexelFatch( map, ivec2( pxCurr.x, pxCurr.y ), 0 ),
-						clampedTexelFatch( map, ivec2( pxNext.x, pxCurr.y ), 0 ),
-						alpha.x
-					);
+					// Sum/count HDR buffers (additive accumulation): interpolate Σrgb and count together,
+					// then divide once. Mixing (rgb/a) across neighbors is wrong when counts differ — e.g.
+					// adaptive tile repeats — and reads as boundary seams, sparkle noise, and blown highs.
+					if ( divideByAlpha > 0.5 ) {
 
-					vec4 p2 = mix(
-						clampedTexelFatch( map, ivec2( pxCurr.x, pxNext.y ), 0 ),
-						clampedTexelFatch( map, ivec2( pxNext.x, pxNext.y ), 0 ),
-						alpha.x
-					);
+						vec4 c00 = texelFetch( map, ivec2( pxCurr.x, pxCurr.y ), 0 );
+						vec4 c10 = texelFetch( map, ivec2( pxNext.x, pxCurr.y ), 0 );
+						vec4 c01 = texelFetch( map, ivec2( pxCurr.x, pxNext.y ), 0 );
+						vec4 c11 = texelFetch( map, ivec2( pxNext.x, pxNext.y ), 0 );
+						vec4 blended = mix(
+							mix( c00, c10, alpha.x ),
+							mix( c01, c11, alpha.x ),
+							alpha.y
+						);
+						vec3 hdrRgb = blended.rgb / max( blended.a, 1e-6 );
+						vec4 res = vec4( hdrRgb, 1.0 );
 
-					gl_FragColor = mix( p1, p2, alpha.y );
+						#if defined( TONE_MAPPING )
+
+						res.xyz = toneMapping( res.xyz );
+
+						#endif
+
+						gl_FragColor = linearToOutputTexel( res );
+
+					} else {
+
+						vec4 p1 = mix(
+							clampedTexelFatch( map, ivec2( pxCurr.x, pxCurr.y ), 0 ),
+							clampedTexelFatch( map, ivec2( pxNext.x, pxCurr.y ), 0 ),
+							alpha.x
+						);
+
+						vec4 p2 = mix(
+							clampedTexelFatch( map, ivec2( pxCurr.x, pxNext.y ), 0 ),
+							clampedTexelFatch( map, ivec2( pxNext.x, pxNext.y ), 0 ),
+							alpha.x
+						);
+
+						gl_FragColor = mix( p1, p2, alpha.y );
+
+					}
+
 					gl_FragColor.a *= opacity;
 					#include <premultiplied_alpha_fragment>
 
