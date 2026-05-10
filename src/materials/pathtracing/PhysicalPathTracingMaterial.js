@@ -78,6 +78,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				bounces: { value: 10 },
 				transmissiveBounces: { value: 10 },
 				filterGlossyFactor: { value: 0 },
+				uRadianceClamp: { value: 0 },
 
 				// camera uniforms
 				physicalCamera: { value: new PhysicalCameraUniform() },
@@ -157,6 +158,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				uCmfZ: { value: new Float32Array( 81 ) },
 				uYCmfCdf: { value: new Float32Array( 82 ) },
 				uYCmfIntegral: { value: 106.857 },
+				uSpectralRendering: { value: 0 },
 				iorCauchyA: { value: 1.5 },
 				iorCauchyB: { value: 0.0 },
 				iorCauchyC: { value: 0.0 },
@@ -284,6 +286,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				uniform int bounces;
 				uniform int transmissiveBounces;
 				uniform float filterGlossyFactor;
+				uniform float uRadianceClamp;
 				uniform int seed;
 
 				// image
@@ -781,6 +784,13 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						ray.direction = scatterRec.direction;
 						ray.origin = hitPoint;
 
+					}
+
+					if ( uRadianceClamp > 0.0 ) {
+						float sampleLuminance = dot( gl_FragColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+						if ( sampleLuminance > uRadianceClamp ) {
+							gl_FragColor.rgb *= uRadianceClamp / sampleLuminance;
+						}
 					}
 
 					gl_FragColor.a *= opacity;

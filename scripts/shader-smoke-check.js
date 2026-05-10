@@ -20,6 +20,7 @@ function expectNoMatch(text, pattern, message) {
 const renderStructs = read('./src/materials/pathtracing/glsl/render_structs.glsl.js');
 const directLight = read('./src/materials/pathtracing/glsl/direct_light_contribution_function.glsl.js');
 const bsdf = read('./src/shader/bsdf/bsdf_functions.glsl.js');
+const spectral = read('./src/shader/bsdf/spectral_accumulator.glsl.js');
 const util = read('./src/shader/common/util_functions.glsl.js');
 const materialMain = read('./src/materials/pathtracing/PhysicalPathTracingMaterial.js');
 
@@ -44,6 +45,18 @@ expectMatch(
 	'environment light path must pass state.wavelength into bsdfResult',
 );
 expectNoMatch(directLight, /throughputColor/, 'direct_light_contribution still references throughputColor');
+expectMatch(materialMain, /uniform float uRadianceClamp;/, 'PhysicalPathTracingMaterial missing radiance clamp uniform');
+expectMatch(
+	materialMain,
+	/sampleLuminance\s*=\s*dot\s*\(\s*gl_FragColor\.rgb,\s*vec3\s*\(\s*0\.2126,\s*0\.7152,\s*0\.0722\s*\)\s*\)/,
+	'PhysicalPathTracingMaterial must clamp final sample luminance for firefly control',
+);
+expectMatch(spectral, /uniform int uSpectralRendering;/, 'spectral accumulator missing preview-mode gate uniform');
+expectMatch(
+	spectral,
+	/if\s*\(\s*uSpectralRendering\s*==\s*0\s*\)\s*return vec3\s*\(\s*throughput\s*\)/,
+	'spectral accumulator must keep low-SPP preview path RGB-stable by default',
+);
 
 expectMatch(
 	bsdf,

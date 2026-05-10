@@ -6814,7 +6814,7 @@
 	//
 	// At each path termination the scalar throughput at the hero wavelength is
 	// converted to an RGB radiance contribution via:
-	//   XYZ = [x̄(λ), ȳ(λ), z̄(λ)] × throughput / pdfLambda
+	//   XYZ = [x̄(λ), ȳ(λ), z̄(λ)] × throughput / (pdfLambda × ∫Y dλ)
 	//   RGB = M_XYZ_to_sRGB × XYZ
 	// where M_XYZ_to_sRGB is the Bradford-adapted D65 matrix (IEC 61966-2-1:1999).
 	//
@@ -6848,6 +6848,11 @@
 
 	// Integral of Y CMF over [380, 780] nm (≈ 106.857 nm).
 	uniform float uYCmfIntegral;
+
+	// Non-zero enables experimental hero-wavelength RGB reconstruction. The
+	// default preview path stays RGB-stable because single-wavelength display
+	// has very high chroma variance at low SPP.
+	uniform int uSpectralRendering;
 
 	// ── CMF linear interpolation ───────────────────────────────────────────────
 
@@ -6913,8 +6918,8 @@
 	// ── Spectral → RGB accumulator ─────────────────────────────────────────────
 
 	// Convert a hero-wavelength path result to linear sRGB.
-	// For path with hero wavelength lambda, scalar throughput, and wavelength PDF:
-	//   XYZ = [x̄(λ), ȳ(λ), z̄(λ)] × throughput / pdfLambda
+// For path with hero wavelength lambda, scalar throughput, and wavelength PDF:
+//   XYZ = [x̄(λ), ȳ(λ), z̄(λ)] × throughput / (pdfLambda × ∫Y dλ)
 	//   RGB = M_D65 × XYZ
 	//
 	// The Bradford-adapted D65 XYZ → linear sRGB matrix (IEC 61966-2-1:1999):
@@ -6924,13 +6929,14 @@
 	//
 	// GLSL mirror of @vitrum/shared-samplers/src/wavelengthSampling.ts::wavelengthToRGB.
 	vec3 wavelengthToRGB( float lambda, float throughput, float pdfLambda ) {
+		if ( uSpectralRendering == 0 ) return vec3( throughput );
 		if ( pdfLambda <= 0.0 ) return vec3( 0.0 );
 
 		float x = sampleCmfX( lambda );
 		float y = sampleCmfY( lambda );
 		float z = sampleCmfZ( lambda );
 
-		float weight = throughput / pdfLambda;
+		float weight = throughput / max( pdfLambda * uYCmfIntegral, 1e-6 );
 		vec3 xyz = vec3( x, y, z ) * weight;
 
 		// XYZ → linear sRGB (Bradford-adapted D65 matrix, IEC 61966-2-1:1999)
@@ -8129,6 +8135,7 @@ bool bvhIntersectFogVolumeHit(
 					bounces: { value: 10 },
 					transmissiveBounces: { value: 10 },
 					filterGlossyFactor: { value: 0 },
+					uRadianceClamp: { value: 0 },
 
 					// camera uniforms
 					physicalCamera: { value: new PhysicalCameraUniform() },
@@ -8208,6 +8215,7 @@ bool bvhIntersectFogVolumeHit(
 					uCmfZ: { value: new Float32Array( 81 ) },
 					uYCmfCdf: { value: new Float32Array( 82 ) },
 					uYCmfIntegral: { value: 106.857 },
+					uSpectralRendering: { value: 0 },
 					iorCauchyA: { value: 1.5 },
 					iorCauchyB: { value: 0.0 },
 					iorCauchyC: { value: 0.0 },
@@ -8335,6 +8343,7 @@ bool bvhIntersectFogVolumeHit(
 				uniform int bounces;
 				uniform int transmissiveBounces;
 				uniform float filterGlossyFactor;
+				uniform float uRadianceClamp;
 				uniform int seed;
 
 				// image
@@ -8832,6 +8841,13 @@ bool bvhIntersectFogVolumeHit(
 						ray.direction = scatterRec.direction;
 						ray.origin = hitPoint;
 
+					}
+
+					if ( uRadianceClamp > 0.0 ) {
+						float sampleLuminance = dot( gl_FragColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+						if ( sampleLuminance > uRadianceClamp ) {
+							gl_FragColor.rgb *= uRadianceClamp / sampleLuminance;
+						}
 					}
 
 					gl_FragColor.a *= opacity;
