@@ -25,13 +25,9 @@ function* renderTask() {
 
 	while ( true ) {
 
-		if ( alpha ) {
-
-			blendMaterial.opacity = this._opacityFactor / ( this.samples + 1 );
-			material.blending = NoBlending;
-			material.opacity = 1;
-
-		} else if ( this.additiveAccumulation ) {
+		// Additive accumulation must win over the alpha-composite path or SUM/COUNT shaders blend
+		// incorrectly into the ping-pong blend targets (see WebGLPathTracer.renderSample).
+		if ( this.additiveAccumulation ) {
 
 			material.opacity = 1;
 			material.blending = CustomBlending;
@@ -41,6 +37,12 @@ function* renderTask() {
 			material.blendDstRGB = OneFactor;
 			material.blendSrcAlpha = OneFactor;
 			material.blendDstAlpha = OneFactor;
+
+		} else if ( alpha ) {
+
+			blendMaterial.opacity = this._opacityFactor / ( this.samples + 1 );
+			material.blending = NoBlending;
+			material.opacity = 1;
 
 		} else {
 

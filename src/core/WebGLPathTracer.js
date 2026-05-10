@@ -445,10 +445,15 @@ export class WebGLPathTracer {
 
 		}
 
-		// when alpha is enabled we use a manual blending system rather than
-		// rendering with a blend function
-		pathTracer.alpha = pathTracer.material.backgroundAlpha !== 1 || ! supportsFloatBlending( renderer );
-		lowResPathTracer.alpha = pathTracer.alpha;
+		// When additive HDR accumulation is on, PathTracingRenderer must render straight into the
+		// primary float target with ONE/ONE blending — not the alpha-composite ping-pong path (used
+		// when backgroundAlpha ≠ 1 or EXT_float_blend is missing). Cornell-style scenes with no
+		// background set backgroundAlpha = 0, which incorrectly forced alpha mode and broke
+		// FEATURE_ADDITIVE_ACCUM while the sample counter still advanced.
+		const needsAlphaComposite =
+			pathTracer.material.backgroundAlpha !== 1 || ! supportsFloatBlending( renderer );
+		pathTracer.alpha = needsAlphaComposite && ! pathTracer.additiveAccumulation;
+		lowResPathTracer.alpha = needsAlphaComposite && ! lowResPathTracer.additiveAccumulation;
 
 		if ( this.renderToCanvas ) {
 

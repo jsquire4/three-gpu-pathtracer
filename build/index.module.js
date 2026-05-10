@@ -8972,13 +8972,9 @@ function* renderTask() {
 
 	while ( true ) {
 
-		if ( alpha ) {
-
-			blendMaterial.opacity = this._opacityFactor / ( this.samples + 1 );
-			material.blending = NoBlending;
-			material.opacity = 1;
-
-		} else if ( this.additiveAccumulation ) {
+		// Additive accumulation must win over the alpha-composite path or SUM/COUNT shaders blend
+		// incorrectly into the ping-pong blend targets (see WebGLPathTracer.renderSample).
+		if ( this.additiveAccumulation ) {
 
 			material.opacity = 1;
 			material.blending = CustomBlending;
@@ -8988,6 +8984,12 @@ function* renderTask() {
 			material.blendDstRGB = OneFactor;
 			material.blendSrcAlpha = OneFactor;
 			material.blendDstAlpha = OneFactor;
+
+		} else if ( alpha ) {
+
+			blendMaterial.opacity = this._opacityFactor / ( this.samples + 1 );
+			material.blending = NoBlending;
+			material.opacity = 1;
 
 		} else {
 
@@ -10175,10 +10177,15 @@ class WebGLPathTracer {
 
 		}
 
-		// when alpha is enabled we use a manual blending system rather than
-		// rendering with a blend function
-		pathTracer.alpha = pathTracer.material.backgroundAlpha !== 1 || ! supportsFloatBlending( renderer );
-		lowResPathTracer.alpha = pathTracer.alpha;
+		// When additive HDR accumulation is on, PathTracingRenderer must render straight into the
+		// primary float target with ONE/ONE blending — not the alpha-composite ping-pong path (used
+		// when backgroundAlpha ≠ 1 or EXT_float_blend is missing). Cornell-style scenes with no
+		// background set backgroundAlpha = 0, which incorrectly forced alpha mode and broke
+		// FEATURE_ADDITIVE_ACCUM while the sample counter still advanced.
+		const needsAlphaComposite =
+			pathTracer.material.backgroundAlpha !== 1 || ! supportsFloatBlending( renderer );
+		pathTracer.alpha = needsAlphaComposite && ! pathTracer.additiveAccumulation;
+		lowResPathTracer.alpha = needsAlphaComposite && ! lowResPathTracer.additiveAccumulation;
 
 		if ( this.renderToCanvas ) {
 
