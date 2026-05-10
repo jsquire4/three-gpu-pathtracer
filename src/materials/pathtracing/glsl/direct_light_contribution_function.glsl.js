@@ -3,6 +3,7 @@ export const direct_light_contribution_function = /*glsl*/`
 	vec3 directLightContribution( vec3 worldWo, SurfaceRecord surf, RenderState state, vec3 rayOrigin ) {
 
 		vec3 result = vec3( 0.0 );
+		vec3 throughputRgb = wavelengthToRGB( state.wavelength, state.throughput, state.wavelengthPdf );
 
 		// uniformly pick a light or environment map
 		if( lightsDenom != 0.0 && rand( 5 ) < float( lights.count ) / lightsDenom ) {
@@ -42,15 +43,14 @@ export const direct_light_contribution_function = /*glsl*/`
 			) {
 
 				// get the material pdf
-				vec3 sampleColor;
-				float lightMaterialPdf = bsdfResult( worldWo, lightRec.direction, surf, sampleColor );
-				bool isValidSampleColor = all( greaterThanEqual( sampleColor, vec3( 0.0 ) ) );
-				if ( lightMaterialPdf > 0.0 && isValidSampleColor ) {
+				float sampleThroughput = 0.0;
+				float lightMaterialPdf = bsdfResult( worldWo, lightRec.direction, surf, state.wavelength, sampleThroughput );
+				if ( lightMaterialPdf > 0.0 && sampleThroughput >= 0.0 ) {
 
 					// weight the direct light contribution
 					float lightPdf = lightRec.pdf / lightsDenom;
 					float misWeight = lightRec.type == SPOT_LIGHT_TYPE || lightRec.type == DIR_LIGHT_TYPE || lightRec.type == POINT_LIGHT_TYPE ? 1.0 : misHeuristic( lightPdf, lightMaterialPdf );
-					result = attenuatedColor * lightRec.emission * state.throughputColor * sampleColor * misWeight / lightPdf;
+					result = attenuatedColor * lightRec.emission * throughputRgb * sampleThroughput * misWeight / lightPdf;
 
 				}
 
@@ -85,15 +85,14 @@ export const direct_light_contribution_function = /*glsl*/`
 			) {
 
 				// get the material pdf
-				vec3 sampleColor;
-				float envMaterialPdf = bsdfResult( worldWo, envDirection, surf, sampleColor );
-				bool isValidSampleColor = all( greaterThanEqual( sampleColor, vec3( 0.0 ) ) );
-				if ( envMaterialPdf > 0.0 && isValidSampleColor ) {
+				float sampleThroughput = 0.0;
+				float envMaterialPdf = bsdfResult( worldWo, envDirection, surf, state.wavelength, sampleThroughput );
+				if ( envMaterialPdf > 0.0 && sampleThroughput >= 0.0 ) {
 
 					// weight the direct light contribution
 					envPdf /= lightsDenom;
 					float misWeight = misHeuristic( envPdf, envMaterialPdf );
-					result = attenuatedColor * environmentIntensity * envColor * state.throughputColor * sampleColor * misWeight / envPdf;
+					result = attenuatedColor * environmentIntensity * envColor * throughputRgb * sampleThroughput * misWeight / envPdf;
 
 				}
 

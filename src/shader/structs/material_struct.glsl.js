@@ -65,6 +65,21 @@ export const material_struct = /* glsl */ `
 		bool flatShading;
 		bool transparent;
 		bool fogVolume;
+		uint flags;
+		float sssSigmaT;
+		float sssAnisotropyG;
+		vec3 sssAlbedo;
+		float dispersionStrength;
+		float thinFilmEnabled;
+		float thinFilmLayerCount;
+		vec3 spectralMu;
+		bool hasSpectralAttenuation;
+		vec3 frontLayerTransmission;
+		float frontLayerRoughness;
+		bool hasFrontLayer;
+		vec3 backLayerTransmission;
+		float backLayerRoughness;
+		bool hasBackLayer;
 
 		mat3 mapTransform;
 		mat3 metalnessMapTransform;
@@ -101,7 +116,7 @@ export const material_struct = /* glsl */ `
 
 	Material readMaterialInfo( sampler2D tex, uint index ) {
 
-		uint i = index * 45u;
+		uint i = index * 68u;
 
 		vec4 s0 = texelFetch1D( tex, i + 0u );
 		vec4 s1 = texelFetch1D( tex, i + 1u );
@@ -118,6 +133,11 @@ export const material_struct = /* glsl */ `
 		vec4 s12 = texelFetch1D( tex, i + 12u );
 		vec4 s13 = texelFetch1D( tex, i + 13u );
 		vec4 s14 = texelFetch1D( tex, i + 14u );
+		vec4 s15 = texelFetch1D( tex, i + 15u );
+		vec4 s16 = texelFetch1D( tex, i + 16u );
+		vec4 s17 = texelFetch1D( tex, i + 17u );
+		vec4 s18 = texelFetch1D( tex, i + 18u );
+		vec4 s19 = texelFetch1D( tex, i + 19u );
 
 		Material m;
 		m.color = s0.rgb;
@@ -180,9 +200,26 @@ export const material_struct = /* glsl */ `
 		m.vertexColors = bool( int( s14.b ) & 1 );
 		m.flatShading = bool( int( s14.b ) & 2 );
 		m.fogVolume = bool( int( s14.b ) & 4 );
-		m.transparent = bool( s14.a );
+		uint packedFlags = uint( round( s14.a ) );
+		m.transparent = bool( packedFlags & 1u );
+		m.flags = packedFlags;
+		m.sssSigmaT = s15.r;
+		m.sssAnisotropyG = s15.g;
+		m.dispersionStrength = s15.b;
+		m.thinFilmEnabled = s15.a;
+		m.sssAlbedo = s16.rgb;
+		m.thinFilmLayerCount = s16.a;
+		m.spectralMu = s17.rgb;
+		uint featureFlags = uint( round( s17.a ) );
+		m.hasSpectralAttenuation = bool( featureFlags & 1u );
+		m.hasFrontLayer = bool( featureFlags & 2u );
+		m.hasBackLayer = bool( featureFlags & 4u );
+		m.frontLayerTransmission = s18.rgb;
+		m.frontLayerRoughness = s18.a;
+		m.backLayerTransmission = s19.rgb;
+		m.backLayerRoughness = s19.a;
 
-		uint firstTextureTransformIdx = i + 15u;
+		uint firstTextureTransformIdx = i + 38u;
 
 		// mat3( 1.0 ) is an identity matrix
 		m.mapTransform = m.map == - 1 ? mat3( 1.0 ) : readTextureTransform( tex, firstTextureTransformIdx );

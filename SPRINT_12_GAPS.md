@@ -28,94 +28,91 @@ patch application, and why.
 
 ---
 
-## Gap §1 — Ray payload restructure (DEFERRED)
+## Gap §1 — Ray payload restructure (APPLIED)
 
 **Spec**: change from `vec3 throughput` to `float wavelength + float throughput`.
 
-**Reason not done**: this is a pervasive change touching every shader function in the
-tracer — `RenderState.throughputColor`, the main loop (path_tracer inline in
-PhysicalPathTracingMaterial.js), `bsdfEval`, `directLightContribution`,
-`attenuateHit`, `sampleBackground`, and all NEE evaluation sites. The change
-requires:
+**Current state**: core restructuring is now landed:
 
-1. Modifying `render_structs.glsl.js`: replace `vec3 throughputColor` with
-   `float wavelength; float throughput;` in `RenderState`.
-2. Updating all `state.throughputColor` reads/writes to scalar `state.throughput`.
-3. Sampling `wavelength` at path start: `float pdfLambda; float wavelength = sampleHeroWavelength(rand(30), pdfLambda);`
-4. At path termination: `gl_FragColor.rgb += wavelengthToRGB(wavelength, state.throughput, pdfLambda);`
-5. All BSDF sites: replace per-channel color operations with scalar throughput.
-6. All MIS weight calculations: scalar rather than per-channel.
+1. `render_structs.glsl.js` now stores `float wavelength; float wavelengthPdf; float throughput;`.
+2. `state.throughputColor` references were removed from the main fragment loop and direct-light helper.
+3. `sampleHeroWavelength(rand(30), state.wavelengthPdf)` now seeds the payload at path start.
+
+**Additional work landed after the initial partial pass**:
+
+1. `ScatterRecord` now carries scalar throughput (no `vec3 color` payload).
+2. BSDF eval/sample/result internals now use scalar throughput values keyed by hero wavelength.
+3. Main-loop throughput updates and roulette no longer rely on luminance projection of RGB BSDF outputs.
 
 **Risk**: this restructure is the single highest-risk change in Sprint 12. It is
 pervasive, GPU-unverifiable in this session, and will conflict with every future
 upstream merge. Estimated effort: 3 days per `plan/sprint-12-pt-fork-patch.md §5`.
 
-**Where to resume**: start in `src/materials/pathtracing/glsl/render_structs.glsl.js`,
-replace `vec3 throughputColor`, then grep for `state.throughputColor` across the
-fragment shader in `PhysicalPathTracingMaterial.js`.
+**Where to resume**: validate the scalar transport numerics with GPU A/B renders and tune
+material spectral mapping heuristics if color drift is observed.
 
 ---
 
-## Gap §2 — Main loop spectral accumulation integration (DEFERRED, depends on §1)
+## Gap §2 — Main loop spectral accumulation integration (APPLIED)
 
 **Spec**: replace `gl_FragColor.rgb += emission * state.throughputColor` with
 `gl_FragColor.rgb += wavelengthToRGB(wavelength, state.throughput, pdfLambda)`.
 
-**Reason not done**: requires §1 first. The `wavelengthToRGB` function is implemented
-and available in `spectral_accumulator.glsl.js`; it just needs to be called.
-
-**Where to resume**: in `PhysicalPathTracingMaterial.js`, search for
-`gl_FragColor.rgb +=` in the main loop and replace with spectral accumulation.
+**Status**: main-loop contribution sites use
+`wavelengthToRGB(state.wavelength, state.throughput, state.wavelengthPdf)` via a
+`throughputRgb` helper in the bounce loop.
 
 ---
 
-## Gap §3 — BSDF wavelength-aware IOR switchover (DEFERRED, depends on §1)
+## Gap §3 — BSDF wavelength-aware IOR switchover (APPLIED)
 
 **Spec**: replace Sprint 8's `dispersionTransmissionDirection` (3 discrete channels)
 with `cauchyIORatLambda(state.wavelength, iorCauchyA, iorCauchyB, iorCauchyC)` at
 the hero wavelength.
 
-**Reason not done**: requires §1 first. `cauchyIORatLambda` is implemented; the call
-site in `dispersionTransmissionDirection` needs to be updated to accept a scalar
-wavelength from the payload instead of computing 3 discrete channels.
+**Status**: `dispersionTransmissionDirection` now accepts `heroWavelength` and uses
+`cauchyIORatLambda(heroWavelength, iorCauchyA, iorCauchyB, iorCauchyC)` directly.
 
-**Where to resume**: in `bsdf_functions.glsl.js`, `dispersionTransmissionDirection`:
-replace the stochastic 1/3 channel selection with a single `cauchyIORatLambda` call
-at the hero wavelength passed from the main loop.
+**Where to resume**: runtime visual/perf validation only.
 
 ---
 
-## Gap §4 — Thin-film stack TMM evaluation (NOT STARTED)
+## Gap §4 — Thin-film stack TMM evaluation (APPLIED, runtime-unverified)
 
 **Spec** (RFE-08): implement transfer-matrix-method evaluation in GLSL for multilayer
 thin-film stacks (`userData.vitrumThinFilmStack`, 35-layer TiO₂/SiO₂ stacks).
 
-**Reason not done**: this is the most complex single piece in Sprint 12. TMM for a
-35-layer stack in GLSL requires:
-- Per-layer complex Fresnel coefficients at the hero wavelength.
-- Matrix multiplication loop (35 iterations × 2×2 complex matrix).
-- Per-wavelength R(λ) and T(λ) output.
+**Current state**:
+- `src/shader/bsdf/thin_film_tmm.glsl.js` added with fixed-bound
+  `#define N_THIN_FILM_LAYERS 35` TE-approximation matrix solver.
+- `src/uniforms/MaterialsTexture.js` now packs per-material 35-layer payload
+  (IOR + thickness per layer) with fixed layout.
+- `src/shader/bsdf/bsdf_functions.glsl.js` now calls `thinFilmTMM(...)` by
+  hit material index to modulate specular and transmission throughput when `surf.thinFilm` is active.
 
-Even ignoring GPU verification, implementing this correctly in a session without
-interactive testing is high-risk. The TMM algorithm is well-specified (Born & Wolf
-§1.6; Heavens "Optical Properties of Thin Solid Films") but the GLSL implementation
-requires careful attention to complex number arithmetic and loop bounds.
-
-**Where to resume**: create `src/shader/bsdf/thin_film_tmm.glsl.js`. Reference:
-`@vitrum/shared-samplers` (no TMM implementation yet) and the spec in
-`external_requests/08-sprint12-spectral-accumulator-fork-patch.md`.
+**Remaining work**:
+- GPU visual verification (iridescent angle shift A/B scenes).
+- Performance validation of the 35-iteration loop on target WebGL2 devices.
 
 ---
 
-## Gap §5 — Spectral attenuation Beer-Lambert (NOT STARTED)
+## Gap §5 — Spectral attenuation Beer-Lambert (APPLIED, runtime-unverified)
 
 **Spec** (RFE-01): read `userData.vitrumSpectralAttenuation` (81-sample curve) and
 integrate into Beer-Lambert calculation per-wavelength.
 
-**Reason not done**: requires §1 first (hero wavelength in payload), plus a new
-uniform array upload path in `MaterialsTexture.js` for the 81-sample curve. The
-Beer-Lambert call site is in `PhysicalPathTracingMaterial.js` at
-`transmissionAttenuation(...)`.
+**Current state**:
+- `MaterialsTexture.js` now ingests per-material `userData.vitrumSpectralAttenuation`
+  and packs representative spectral absorption coefficients into the material payload.
+- `material_struct.glsl.js` and `surface_record_struct.glsl.js` propagate these
+  spectral coefficients to shading.
+- `transmissionAttenuationHero(...)` applies hero-wavelength Beer-Lambert attenuation
+  in both the main path-throughput update and the direct-light occlusion attenuation
+  path (`attenuate_hit_function.glsl.js`).
+
+**Remaining work**:
+- GPU visual validation for spectral colored attenuation scenes.
+- Perf validation against the Sprint 12 baseline.
 
 ---
 
@@ -127,11 +124,11 @@ Beer-Lambert call site is in `PhysicalPathTracingMaterial.js` at
 | `sampleHeroWavelength` GLSL | APPLIED | — |
 | `cauchyIORatLambda` function | APPLIED | — |
 | New uniforms (CMF arrays, Cauchy A/B/C) | APPLIED | — |
-| Ray payload restructure (vec3 → float+float) | DEFERRED | 3 days work, pervasive |
-| Main loop spectral accumulation | DEFERRED | Ray payload restructure |
-| BSDF hero-wavelength IOR switchover | DEFERRED | Ray payload restructure |
-| Thin-film TMM | NOT STARTED | Complexity + no GPU verification |
-| Spectral attenuation Beer-Lambert | NOT STARTED | Ray payload restructure |
+| Ray payload restructure (vec3 → float+float) | APPLIED | Runtime visual verification pending |
+| Main loop spectral accumulation | APPLIED | Runtime visual verification pending |
+| BSDF hero-wavelength IOR switchover | APPLIED | Runtime verification pending |
+| Thin-film TMM | APPLIED (runtime-unverified) | Visual/perf verification |
+| Spectral attenuation Beer-Lambert | APPLIED (runtime-unverified) | Visual/perf verification |
 
 GPU verification was not available in this session. All applied GLSL is syntactically
 valid JavaScript/GLSL template literals but shader correctness depends on WebGL

@@ -147,8 +147,17 @@ export const attenuate_hit_function = /* glsl */`
 
 				} else if ( surfaceHit.side == - 1.0 ) {
 
-					// attenuate by medium once we hit the opposite side of the model
-					color *= transmissionAttenuation( surfaceHit.dist, material.attenuationColor, material.attenuationDistance );
+					// attenuate by medium once we hit the opposite side of the model.
+					// Sprint 12 Gap §5: use hero-wavelength attenuation when spectral data exists.
+					float attenuation = transmissionAttenuationHero(
+						surfaceHit.dist,
+						material.attenuationColor,
+						material.attenuationDistance,
+						material.hasSpectralAttenuation,
+						material.spectralMu,
+						state.wavelength
+					);
+					color *= vec3( attenuation );
 
 				}
 

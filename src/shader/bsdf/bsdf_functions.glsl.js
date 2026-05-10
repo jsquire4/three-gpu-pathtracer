@@ -11,17 +11,26 @@ f90    : Amount of light reflected at grazing angles
 
 export const bsdf_functions = /* glsl */`
 
-	// Sprint 7: TRANSLUCENT material flag bit for SSS single-scatter path.
-	// Bit 4 of a hypothetical flags field; gated by u_sssSigmaT > 0 at the
-	// call site because the material struct does not yet carry per-material
-	// flag bits (they are packed into sample 14 in MaterialsTexture.js and
-	// the GLSL readMaterialInfo does not expose a raw flags word).
-	// TODO(sprint-7-flags): extend material_struct.glsl.js with a flags uint
-	// and pack TRANSLUCENT_BIT into MaterialsTexture.js sample 14.
+	// Sprint 7: TRANSLUCENT material flag bit for per-material SSS gating.
+	// Packed in MaterialsTexture sample 14 and unpacked by readMaterialInfo().
 	const uint TRANSLUCENT_BIT = 0x10u;  // bit 4
 
+	// Approximate scalar spectral weight at the hero wavelength from an RGB triplet.
+	// This keeps the payload scalar while preserving wavelength-dependent material response.
+	float heroWeightFromRgb( vec3 rgb, float heroWavelength ) {
+		float tB = 1.0 - smoothstep( 470.0, 530.0, heroWavelength );
+		float tR = smoothstep( 570.0, 650.0, heroWavelength );
+		float tG = clamp( 1.0 - tB - tR, 0.0, 1.0 );
+		return max( dot( rgb, vec3( tR, tG, tB ) ), 0.0 );
+	}
+
+	float activeLayerWeight( SurfaceRecord surf, float heroWavelength ) {
+		if ( ! surf.hasActiveLayer ) return 1.0;
+		return heroWeightFromRgb( surf.activeLayerTransmission, heroWavelength );
+	}
+
 	// diffuse
-	float diffuseEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, inout vec3 color ) {
+	float diffuseEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, float heroWavelength, inout float throughput ) {
 
 		// https://schuttejoe.github.io/post/disneybsdf/
 		float fl = schlickFresnel( wi.z, 0.0 );
@@ -37,7 +46,8 @@ export const bsdf_functions = /* glsl */`
 
 		// float F = evaluateFresnelWeight( dot( wo, wh ), surf.eta, surf.f0 );
 		float F = disneyFresnel( wo, wi, wh, surf.f0, surf.eta, surf.metalness );
-		color = ( 1.0 - F ) * transFactor * metalFactor * wi.z * surf.color * ( retro + lambert ) / PI;
+		float albedo = heroWeightFromRgb( surf.color, heroWavelength );
+		throughput = ( 1.0 - F ) * transFactor * metalFactor * wi.z * albedo * ( retro + lambert ) / PI;
 
 		return wi.z / PI;
 
@@ -54,7 +64,7 @@ export const bsdf_functions = /* glsl */`
 	}
 
 	// specular
-	float specularEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, inout vec3 color ) {
+	float specularEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, float heroWavelength, inout float throughput ) {
 
 		// if roughness is set to 0 then D === NaN which results in black pixels
 		float metalness = surf.metalness;
@@ -78,7 +88,11 @@ export const bsdf_functions = /* glsl */`
 		float G1 = ggxShadowMaskG1( incidentTheta, roughness );
 		float ggxPdf = D * G1 * max( 0.0, abs( dot( wo, wh ) ) ) / abs ( wo.z );
 
-		color = wi.z * F * G * D / ( 4.0 * abs( wi.z * wo.z ) );
+		throughput = wi.z * heroWeightFromRgb( F, heroWavelength ) * G * D / ( 4.0 * abs( wi.z * wo.z ) );
+		if ( surf.thinFilm && surf.thinFilmEnabled > 0.5 ) {
+			vec2 rt = thinFilmTMM( surf.materialIndex, int( surf.thinFilmLayerCount ), heroWavelength, surf.ior );
+			throughput *= max( rt.x, 1e-4 );
+		}
 		return ggxPdf / ( 4.0 * dot( wo, wh ) );
 
 	}
@@ -144,9 +158,13 @@ export const bsdf_functions = /* glsl */`
 
 	// TODO: This is just using a basic cosine-weighted specular distribution with an
 	// incorrect PDF value at the moment. Update it to correctly use a GGX distribution
-	float transmissionEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, inout vec3 color ) {
+	float transmissionEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, float heroWavelength, inout float throughput ) {
 
-		color = surf.transmission * surf.color;
+		throughput = surf.transmission * heroWeightFromRgb( surf.color, heroWavelength );
+		if ( surf.thinFilm && surf.thinFilmEnabled > 0.5 ) {
+			vec2 rt = thinFilmTMM( surf.materialIndex, int( surf.thinFilmLayerCount ), heroWavelength, surf.ior );
+			throughput *= max( rt.y, 1e-4 );
+		}
 
 		// PDF
 		// float F = evaluateFresnelWeight( dot( wo, wh ), surf.eta, surf.f0 );
@@ -206,10 +224,9 @@ export const bsdf_functions = /* glsl */`
 	// New uniforms: iorCauchyA, iorCauchyB, iorCauchyC (see PhysicalPathTracingMaterial.js).
 	// Sprint 8 uniforms (u_ior0, u_dispersionStrength) are kept for backward compatibility.
 	//
-	// TODO(sprint-12-payload): once the ray payload is restructured from vec3 throughput to
-	// (float wavelength, float throughput), replace the Sprint 8 per-channel gate in
-	// dispersionTransmissionDirection() with a call to cauchyIORatLambda(heroWavelength, A, B, C).
-	// See SPRINT_12_GAPS.md §1 for the full payload restructure plan.
+	// Sprint 12 payload restructure note:
+	// dispersionTransmissionDirection() now consumes the payload-carried hero wavelength
+	// and Cauchy A/B/C uniforms. Remaining scalarisation work is tracked in SPRINT_12_GAPS.md.
 	float cauchyIORatLambda( float lambdaNm, float A, float B, float C ) {
 		float lambdaUm = lambdaNm * 0.001;  // nm → µm
 		float lam2 = lambdaUm * lambdaUm;
@@ -239,50 +256,12 @@ export const bsdf_functions = /* glsl */`
 		return 0.5 + x * inversesqrt( 1.0 + x * x ) * 0.5;
 	}
 
-	// Sprint 8: dielectric transmission with per-channel IOR via Cauchy formula.
-	// Stochastically selects one of three wavelengths {700, 550, 450} nm,
-	// weights that channel by 3× (importance-sampling the 1/3-probability choice),
-	// and refracts along the wavelength-specific direction.
-	//
-	// Gate: only active when u_dispersionStrength > 1e-4.  Falls back to the
-	// single-IOR path (transmissionDirection) when dispersion is disabled.
-	// This ensures non-bevel glass pays zero per-channel cost.
-	//
-	// Per plan/sprint-8-pt-fork-patch.md §1-2.
-	vec3 dispersionTransmissionDirection( vec3 wo, SurfaceRecord surf, inout vec3 channelMask ) {
+	// Sprint 12: dielectric transmission at the path's hero wavelength.
+	// Uses the payload-carried wavelength and Cauchy A/B/C uniforms.
+	vec3 dispersionTransmissionDirection( vec3 wo, SurfaceRecord surf, float wavelengthNm ) {
+		float chosenIor = cauchyIORatLambda( wavelengthNm, surf.ior, surf.dispersionStrength * 1e-6, 0.0 );
 
-		const float LAMBDA_R = 700.0;  // nm — red channel
-		const float LAMBDA_G = 550.0;  // nm — green channel
-		const float LAMBDA_B = 450.0;  // nm — blue channel
-
-		// Per-channel spectral weight from Jakob+Hanika polynomial.
-		float specR = evalSpectrum( u_jakobCoeffs, LAMBDA_R );
-		float specG = evalSpectrum( u_jakobCoeffs, LAMBDA_G );
-		float specB = evalSpectrum( u_jakobCoeffs, LAMBDA_B );
-
-		// Per-channel IOR from Cauchy formula.
-		// u_dispersionStrength is the Cauchy B coefficient in nm² scale.
-		// u_ior0 is the base IOR at 589.3 nm.
-		float iorR = u_ior0 + u_dispersionStrength * specR / ( LAMBDA_R * LAMBDA_R );
-		float iorG = u_ior0 + u_dispersionStrength * specG / ( LAMBDA_G * LAMBDA_G );
-		float iorB = u_ior0 + u_dispersionStrength * specB / ( LAMBDA_B * LAMBDA_B );
-
-		// Stochastic wavelength selection: choose one of three channels (1/3 each).
-		// Weight the chosen channel by 3× to maintain unbiased expectation.
-		float choiceRand = rand( 23 );
-		float chosenIor;
-		if ( choiceRand < 1.0 / 3.0 ) {
-			chosenIor = iorR;
-			channelMask = vec3( 3.0, 0.0, 0.0 );
-		} else if ( choiceRand < 2.0 / 3.0 ) {
-			chosenIor = iorG;
-			channelMask = vec3( 0.0, 3.0, 0.0 );
-		} else {
-			chosenIor = iorB;
-			channelMask = vec3( 0.0, 0.0, 3.0 );
-		}
-
-		// Refract using the chosen per-wavelength IOR (front-face: air→glass = 1/ior).
+		// Refract using the hero-wavelength IOR (front-face: air→glass = 1/ior).
 		bool frontFace = surf.frontFace;
 		float eta = frontFace ? 1.0 / chosenIor : chosenIor;
 
@@ -298,7 +277,7 @@ export const bsdf_functions = /* glsl */`
 	}
 
 	// clearcoat
-	float clearcoatEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, inout vec3 color ) {
+	float clearcoatEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, float heroWavelength, inout float throughput ) {
 
 		float ior = 1.5;
 		float f0 = iorRatioToF0( ior );
@@ -311,7 +290,7 @@ export const bsdf_functions = /* glsl */`
 		float F = schlickFresnel( dot( wi, wh ), f0 );
 
 		float fClearcoat = F * D * G / ( 4.0 * abs( wi.z * wo.z ) );
-		color = color * ( 1.0 - surf.clearcoat * F ) + fClearcoat * surf.clearcoat * wi.z;
+		throughput = throughput * ( 1.0 - surf.clearcoat * F ) + fClearcoat * surf.clearcoat * wi.z;
 
 		// PDF
 		// See equation (27) in http://jcgt.org/published/0003/02/03/
@@ -335,7 +314,7 @@ export const bsdf_functions = /* glsl */`
 	}
 
 	// sheen
-	vec3 sheenColor( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf ) {
+	float sheenEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, float heroWavelength ) {
 
 		float cosThetaO = saturateCos( wo.z );
 		float cosThetaI = saturateCos( wi.z );
@@ -345,11 +324,11 @@ export const bsdf_functions = /* glsl */`
 		float G = velvetG( cosThetaO, cosThetaI, surf.sheenRoughness );
 
 		// See equation (1) in http://www.aconty.com/pdf/s2017_pbs_imageworks_sheen.pdf
-		vec3 color = surf.sheenColor;
-		color *= D * G / ( 4.0 * abs( cosThetaO * cosThetaI ) );
-		color *= wi.z;
+		float sheen = heroWeightFromRgb( surf.sheenColor, heroWavelength );
+		sheen *= D * G / ( 4.0 * abs( cosThetaO * cosThetaI ) );
+		sheen *= wi.z;
 
-		return color;
+		return sheen;
 
 	}
 
@@ -381,7 +360,8 @@ export const bsdf_functions = /* glsl */`
 
 	float bsdfEval(
 		vec3 wo, vec3 clearcoatWo, vec3 wi, vec3 clearcoatWi, SurfaceRecord surf,
-		float diffuseWeight, float specularWeight, float transmissionWeight, float clearcoatWeight, inout float specularPdf, inout vec3 color
+		float heroWavelength,
+		float diffuseWeight, float specularWeight, float transmissionWeight, float clearcoatWeight, inout float specularPdf, inout float throughput
 	) {
 
 		float metalness = surf.metalness;
@@ -391,45 +371,48 @@ export const bsdf_functions = /* glsl */`
 		float dpdf = 0.0;
 		float tpdf = 0.0;
 		float cpdf = 0.0;
-		color = vec3( 0.0 );
+		throughput = 0.0;
 
 		vec3 halfVector = getHalfVector( wi, wo, surf.eta );
 
 		// diffuse
 		if ( diffuseWeight > 0.0 && wi.z > 0.0 ) {
 
-			dpdf = diffuseEval( wo, wi, halfVector, surf, color );
-			color *= 1.0 - surf.transmission;
+			dpdf = diffuseEval( wo, wi, halfVector, surf, heroWavelength, throughput );
+			throughput *= 1.0 - surf.transmission;
 
 		}
 
 		// ggx specular
 		if ( specularWeight > 0.0 && wi.z > 0.0 ) {
 
-			vec3 outColor;
-			spdf = specularEval( wo, wi, getHalfVector( wi, wo ), surf, outColor );
-			color += outColor;
+			float outThroughput = 0.0;
+			spdf = specularEval( wo, wi, getHalfVector( wi, wo ), surf, heroWavelength, outThroughput );
+			throughput += outThroughput;
 
 		}
 
 		// transmission
 		if ( transmissionWeight > 0.0 && wi.z < 0.0 ) {
 
-			tpdf = transmissionEval( wo, wi, halfVector, surf, color );
+			tpdf = transmissionEval( wo, wi, halfVector, surf, heroWavelength, throughput );
 
 		}
 
 		// sheen
-		color *= mix( 1.0, sheenAlbedoScaling( wo, wi, surf ), surf.sheen );
-		color += sheenColor( wo, wi, halfVector, surf ) * surf.sheen;
+		throughput *= mix( 1.0, sheenAlbedoScaling( wo, wi, surf ), surf.sheen );
+		throughput += sheenEval( wo, wi, halfVector, surf, heroWavelength ) * surf.sheen;
 
 		// clearcoat
 		if ( clearcoatWi.z >= 0.0 && clearcoatWeight > 0.0 ) {
 
 			vec3 clearcoatHalfVector = getHalfVector( clearcoatWo, clearcoatWi );
-			cpdf = clearcoatEval( clearcoatWo, clearcoatWi, clearcoatHalfVector, surf, color );
+			cpdf = clearcoatEval( clearcoatWo, clearcoatWi, clearcoatHalfVector, surf, heroWavelength, throughput );
 
 		}
+
+		// RFE-03: apply selected front/back layer absorption exactly once in BSDF flow.
+		throughput *= activeLayerWeight( surf, heroWavelength );
 
 		float pdf =
 			dpdf * diffuseWeight
@@ -444,11 +427,11 @@ export const bsdf_functions = /* glsl */`
 
 	}
 
-	float bsdfResult( vec3 worldWo, vec3 worldWi, SurfaceRecord surf, inout vec3 color ) {
+	float bsdfResult( vec3 worldWo, vec3 worldWi, SurfaceRecord surf, float heroWavelength, inout float throughput ) {
 
 		if ( surf.volumeParticle ) {
 
-			color = surf.color / ( 4.0 * PI );
+			throughput = heroWeightFromRgb( surf.color, heroWavelength ) / ( 4.0 * PI );
 			return 1.0 / ( 4.0 * PI );
 
 		}
@@ -467,7 +450,10 @@ export const bsdf_functions = /* glsl */`
 		getLobeWeights( wo, wi, wh, clearcoatWo, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight );
 
 		float specularPdf;
-		return bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, specularPdf, color );
+		return bsdfEval(
+			wo, clearcoatWo, wi, clearcoatWi, surf, heroWavelength,
+			diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, specularPdf, throughput
+		);
 
 	}
 
@@ -477,24 +463,24 @@ export const bsdf_functions = /* glsl */`
 	// The scatter position is sampled from an exponential distribution along
 	// the refracted direction; the scattered direction is sampled from HG.
 	// Mirrors @vitrum/shared-samplers/src/hgPhase.ts::sampleHG.
-	ScatterRecord sssSample( vec3 worldWo, SurfaceRecord surf ) {
+	ScatterRecord sssSample( vec3 worldWo, SurfaceRecord surf, float heroWavelength ) {
 
-		float tScatter = sampleExponential( rand( 17 ), u_sssSigmaT, 1e6 );
-		float beerLambert = exp( - u_sssSigmaT * tScatter );
+		float tScatter = sampleExponential( rand( 17 ), surf.sssSigmaT, 1e6 );
+		float beerLambert = exp( - surf.sssSigmaT * tScatter );
 
 		vec3 rd = normalize( - worldWo ); // refracted direction approximation
-		vec3 scatterDir = sampleHG_glsl( rand( 18 ), rand( 19 ), u_sssAnisotropyG, rd );
+		vec3 scatterDir = sampleHG_glsl( rand( 18 ), rand( 19 ), surf.sssAnisotropyG, rd );
 
 		ScatterRecord sssRec;
-		sssRec.pdf = hg_phase( dot( rd, scatterDir ), u_sssAnisotropyG );
+		sssRec.pdf = hg_phase( dot( rd, scatterDir ), surf.sssAnisotropyG );
 		sssRec.specularPdf = 0.0;
 		sssRec.direction = scatterDir;
-		sssRec.color = u_sssAlbedo * beerLambert;
+		sssRec.throughput = heroWeightFromRgb( surf.sssAlbedo, heroWavelength ) * beerLambert;
 		return sssRec;
 
 	}
 
-	ScatterRecord bsdfSample( vec3 worldWo, SurfaceRecord surf ) {
+	ScatterRecord bsdfSample( vec3 worldWo, SurfaceRecord surf, float heroWavelength ) {
 
 		if ( surf.volumeParticle ) {
 
@@ -502,7 +488,7 @@ export const bsdf_functions = /* glsl */`
 			sampleRec.specularPdf = 0.0;
 			sampleRec.pdf = 1.0 / ( 4.0 * PI );
 			sampleRec.direction = sampleSphere( rand2( 16 ) );
-			sampleRec.color = surf.color / ( 4.0 * PI );
+			sampleRec.throughput = heroWeightFromRgb( surf.color, heroWavelength ) / ( 4.0 * PI );
 			return sampleRec;
 
 		}
@@ -566,18 +552,10 @@ export const bsdf_functions = /* glsl */`
 
 		} else if ( r <= cdf[2] ) { // transmission / refraction
 
-			// Sprint 8: per-channel IOR via Cauchy formula when dispersion is enabled.
-			// Gate: u_dispersionStrength > 1e-4 (non-bevel glass takes the fast path).
-			if ( u_dispersionStrength > 1e-4 ) {
-				vec3 channelMask = vec3( 1.0 );
-				wi = dispersionTransmissionDirection( wo, surf, channelMask );
+			// Sprint 12: hero-wavelength IOR path when dispersion is enabled.
+			if ( surf.dispersionStrength > 1e-4 ) {
+				wi = dispersionTransmissionDirection( wo, surf, heroWavelength );
 				clearcoatWi = normalize( clearcoatInvBasis * normalize( normalBasis * wi ) );
-				ScatterRecord dispResult;
-				dispResult.pdf = bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, dispResult.specularPdf, dispResult.color );
-				// Apply the 3× channel weight from stochastic wavelength selection.
-				dispResult.color *= channelMask;
-				dispResult.direction = normalize( surf.normalBasis * wi );
-				return dispResult;
 			} else {
 				wi = transmissionDirection( wo, surf );
 				clearcoatWi = normalize( clearcoatInvBasis * normalize( normalBasis * wi ) );
@@ -591,7 +569,10 @@ export const bsdf_functions = /* glsl */`
 		}
 
 		ScatterRecord result;
-		result.pdf = bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, result.specularPdf, result.color );
+		result.pdf = bsdfEval(
+			wo, clearcoatWo, wi, clearcoatWi, surf, heroWavelength,
+			diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, result.specularPdf, result.throughput
+		);
 		result.direction = normalize( surf.normalBasis * wi );
 
 		return result;

@@ -150,9 +150,8 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				// Sprint 12 Cauchy IOR uniforms (replaces Sprint 8 ior0 + dispersionStrength).
 				// iorCauchyA/B/C in µm units; see plan/sprint-12-pt-fork-patch.md §3.
 				//
-				// NOTE: Ray payload restructure (vec3 throughput → float wavelength + float throughput)
-				// is NOT yet applied — see SPRINT_12_GAPS.md. Uniforms wired in advance
-				// so the host can upload CMF data without a GLSL recompile.
+				// NOTE: Ray payload restructure is in progress in the fork; uniforms are
+				// still wired here directly for host upload of CMF/Cauchy data.
 				uCmfX: { value: new Float32Array( 81 ) },
 				uCmfY: { value: new Float32Array( 81 ) },
 				uCmfZ: { value: new Float32Array( 81 ) },
@@ -310,6 +309,9 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				uniform float u_ior0;
 				uniform float u_dispersionStrength;
 				uniform vec3 u_jakobCoeffs;
+				uniform float iorCauchyA;
+				uniform float iorCauchyB;
+				uniform float iorCauchyC;
 
 				${ PTBVHGLSL.inside_fog_volume_function }
 				${ BSDFGLSL.ggx_functions }
@@ -318,6 +320,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				${ BSDFGLSL.fog_functions }
 				${ BSDFGLSL.volume_march }
 				${ BSDFGLSL.spectral_accumulator }
+				${ BSDFGLSL.thin_film_tmm }
 				${ BSDFGLSL.bsdf_functions }
 
 				float applyFilteredGlossy( float roughness, float accumulatedRoughness ) {
@@ -384,6 +387,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 					// path tracing state
 					RenderState state = initRenderState();
+					state.wavelength = sampleHeroWavelength( rand( 30 ), state.wavelengthPdf );
 					state.transmissiveTraversals = transmissiveBounces;
 					#if FEATURE_FOG
 
@@ -404,6 +408,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						state.firstRay = i == 0 && state.transmissiveTraversals == transmissiveBounces;
 
 						int hitType = traceScene( ray, state.fogMaterial, surfaceHit );
+						vec3 throughputRgb = wavelengthToRGB( state.wavelength, state.throughput, state.wavelengthPdf );
 
 						// Sprint 7: Volume scatter event — homogeneous medium march.
 						// If u_volumeDensity > 0, sample a potential scatter distance.
@@ -419,9 +424,6 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 								// Choose new scattered direction via HG sampling.
 								vec3 scatterDir = sampleHG_glsl( rand( 21 ), rand( 22 ), u_anisotropyG, ray.direction );
-								float cosTheta = dot( ray.direction, scatterDir );
-								float phaseVal = hg_phase( cosTheta, u_anisotropyG );
-
 								// Beer-Lambert transmittance to scatter point.
 								float transmittance = exp( - u_volumeDensity * tScatter );
 
@@ -429,7 +431,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 								// For single-scatter: throughput *= σ_s × phase(cosθ) / (σ_t × phase(cosθ))
 								//                               = σ_s / σ_t = scatterAlbedo
 								// The phase function cancels since we importance-sample from HG (pdf = phase).
-								state.throughputColor *= u_scatterAlbedo * transmittance;
+								state.throughput *= heroWeightFromRgb( u_scatterAlbedo, state.wavelength ) * transmittance;
 
 								// Advance ray from scatter position with new direction.
 								ray.origin = scatterPos;
@@ -458,11 +460,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 									// weight the contribution
 									// NOTE: Only area lights are supported for forward sampling and can be hit
 									float misWeight = misHeuristic( scatterRec.pdf, lightRec.pdf / lightsDenom );
-									gl_FragColor.rgb += lightRec.emission * state.throughputColor * misWeight;
+									gl_FragColor.rgb += lightRec.emission * throughputRgb * misWeight;
 
 									#else
 
-									gl_FragColor.rgb += lightRec.emission * state.throughputColor;
+									gl_FragColor.rgb += lightRec.emission * throughputRgb;
 
 									#endif
 
@@ -476,7 +478,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 							if ( state.firstRay || state.transmissiveRay ) {
 
-								gl_FragColor.rgb += sampleBackground( ray.direction, rand2( 2 ) ) * state.throughputColor;
+								gl_FragColor.rgb += sampleBackground( ray.direction, rand2( 2 ) ) * throughputRgb;
 								gl_FragColor.a = backgroundAlpha;
 
 							} else {
@@ -490,14 +492,14 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 								// and weight the contribution
 								float misWeight = misHeuristic( scatterRec.pdf, envPdf );
-								gl_FragColor.rgb += environmentIntensity * envColor * state.throughputColor * misWeight;
+								gl_FragColor.rgb += environmentIntensity * envColor * throughputRgb * misWeight;
 
 								#else
 
 								gl_FragColor.rgb +=
 									environmentIntensity *
 									sampleEquirectColor( envMapInfo.map, envRotation3x3 * ray.direction ) *
-									state.throughputColor;
+									throughputRgb;
 
 								#endif
 
@@ -551,7 +553,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						SurfaceRecord surf;
 						if (
 							getSurfaceRecord(
-								material, surfaceHit, attributesArray, state.accumulatedRoughness,
+								material, materialIndex, surfaceHit, attributesArray, state.accumulatedRoughness,
 								surf
 							) == SKIP_SURFACE
 						) {
@@ -566,7 +568,18 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 						}
 
-						scatterRec = bsdfSample( - ray.direction, surf );
+						// Sprint 7: gate SSS by per-material TRANSLUCENT_BIT and back-face traversal.
+						// Falls back to standard BSDF sampling for non-translucent materials.
+						bool canUseSss =
+							surf.sssSigmaT > 0.0 &&
+							( ( material.flags & TRANSLUCENT_BIT ) != 0u ) &&
+							! surf.frontFace;
+						if ( canUseSss ) {
+							scatterRec = sssSample( - ray.direction, surf, state.wavelength );
+							scatterRec.throughput *= activeLayerWeight( surf, state.wavelength );
+						} else {
+							scatterRec = bsdfSample( - ray.direction, surf, state.wavelength );
+						}
 						state.isShadowRay = scatterRec.specularPdf < rand( 4 );
 
 						bool isBelowSurface = ! surf.volumeParticle && dot( scatterRec.direction, surf.faceNormal ) < 0.0;
@@ -596,7 +609,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						}
 
 						// accumulate emissive color
-						gl_FragColor.rgb += ( surf.emission * state.throughputColor );
+						gl_FragColor.rgb += ( surf.emission * throughputRgb );
 
 						// skip the sample if our PDF or ray is impossible
 						if ( scatterRec.pdf <= 0.0 || ! isDirectionValid( scatterRec.direction, surf.normal, surf.faceNormal ) ) {
@@ -621,7 +634,14 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						// attenuate the throughput color by the medium color
 						if ( ! surf.frontFace ) {
 
-							state.throughputColor *= transmissionAttenuation( surfaceHit.dist, surf.attenuationColor, surf.attenuationDistance );
+							state.throughput *= transmissionAttenuationHero(
+								surfaceHit.dist,
+								surf.attenuationColor,
+								surf.attenuationDistance,
+								surf.hasSpectralAttenuation,
+								surf.spectralMu,
+								state.wavelength
+							);
 
 						}
 
@@ -632,8 +652,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						uint minBounces = 3u;
 						float depthProb = float( state.depth < minBounces );
 
-						float rrProb = luminance( state.throughputColor * scatterRec.color / scatterRec.pdf );
-						rrProb /= luminance( state.throughputColor );
+						float rrProb = scatterRec.throughput / max( scatterRec.pdf, 1e-6 );
 						rrProb = sqrt( rrProb );
 						rrProb = max( rrProb, depthProb );
 						rrProb = min( rrProb, 1.0 );
@@ -644,13 +663,13 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						}
 
 						// perform sample clamping here to avoid bright pixels
-						state.throughputColor *= min( 1.0 / rrProb, 20.0 );
+						state.throughput *= min( 1.0 / rrProb, 20.0 );
 
 						#endif
 
 						// adjust the throughput and discard and exit if we find discard the sample if there are any NaNs
-						state.throughputColor *= scatterRec.color / scatterRec.pdf;
-						if ( any( isnan( state.throughputColor ) ) || any( isinf( state.throughputColor ) ) ) {
+						state.throughput *= scatterRec.throughput / scatterRec.pdf;
+						if ( isnan( state.throughput ) || isinf( state.throughput ) ) {
 
 							break;
 

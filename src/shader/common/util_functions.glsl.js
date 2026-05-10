@@ -26,6 +26,23 @@ export const util_functions = /* glsl */`
 
 	}
 
+	// Approximate hero-wavelength scalar from a RGB triplet parameterized as [R,G,B].
+	float heroScalarFromRgb( vec3 rgb, float heroWavelength ) {
+		float tB = 1.0 - smoothstep( 470.0, 530.0, heroWavelength );
+		float tR = smoothstep( 570.0, 650.0, heroWavelength );
+		float tG = clamp( 1.0 - tB - tR, 0.0, 1.0 );
+		return max( dot( rgb, vec3( tR, tG, tB ) ), 0.0 );
+	}
+
+	// Hero-wavelength Beer-Lambert attenuation using per-material spectral μ samples.
+	float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, bool hasSpectral, vec3 spectralMu, float heroWavelength ) {
+		if ( hasSpectral ) {
+			float mu = max( heroScalarFromRgb( spectralMu, heroWavelength ), 0.0 );
+			return exp( - mu * dist );
+		}
+		return heroScalarFromRgb( transmissionAttenuation( dist, attColor, attDist ), heroWavelength );
+	}
+
 	vec3 getHalfVector( vec3 wi, vec3 wo, float eta ) {
 
 		// get the half vector - assuming if the light incident vector is on the other side
