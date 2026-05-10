@@ -11,6 +11,15 @@ f90    : Amount of light reflected at grazing angles
 
 export const bsdf_functions = /* glsl */`
 
+	// Sprint 7: TRANSLUCENT material flag bit for SSS single-scatter path.
+	// Bit 4 of a hypothetical flags field; gated by u_sssSigmaT > 0 at the
+	// call site because the material struct does not yet carry per-material
+	// flag bits (they are packed into sample 14 in MaterialsTexture.js and
+	// the GLSL readMaterialInfo does not expose a raw flags word).
+	// TODO(sprint-7-flags): extend material_struct.glsl.js with a flags uint
+	// and pack TRANSLUCENT_BIT into MaterialsTexture.js sample 14.
+	const uint TRANSLUCENT_BIT = 0x10u;  // bit 4
+
 	// diffuse
 	float diffuseEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, inout vec3 color ) {
 
@@ -178,6 +187,111 @@ export const bsdf_functions = /* glsl */`
 
 			lightDirection = - refract( normalize( - lightDirection ), - vec3( 0.0, 0.0, 1.0 ), 1.0 / eta );
 
+		}
+		return normalize( lightDirection );
+
+	}
+
+	// ── Sprint 12: Cauchy IOR at arbitrary wavelength ────────────────────────────
+	//
+	// cauchyIORatLambda: evaluate IOR at a given wavelength using the three-term Cauchy formula.
+	// GLSL mirror of @vitrum/shared-samplers/src/cauchyIor.ts::cauchyIOR.
+	//
+	// Parameters: lambdaNm in nm; A, B, C in µm units (Sprint 12 coefficient form).
+	//   n(λ) = A + B/λ² + C/λ⁴    (λ in µm)
+	//
+	// This function is the Sprint 12 replacement for Sprint 8's per-channel Cauchy approach.
+	// It is called at the hero wavelength sampled from sampleHeroWavelength in the main loop.
+	//
+	// New uniforms: iorCauchyA, iorCauchyB, iorCauchyC (see PhysicalPathTracingMaterial.js).
+	// Sprint 8 uniforms (u_ior0, u_dispersionStrength) are kept for backward compatibility.
+	//
+	// TODO(sprint-12-payload): once the ray payload is restructured from vec3 throughput to
+	// (float wavelength, float throughput), replace the Sprint 8 per-channel gate in
+	// dispersionTransmissionDirection() with a call to cauchyIORatLambda(heroWavelength, A, B, C).
+	// See SPRINT_12_GAPS.md §1 for the full payload restructure plan.
+	float cauchyIORatLambda( float lambdaNm, float A, float B, float C ) {
+		float lambdaUm = lambdaNm * 0.001;  // nm → µm
+		float lam2 = lambdaUm * lambdaUm;
+		float lam4 = lam2 * lam2;
+		// Fast path: skip C term when near-zero to save one division.
+		if ( abs( C ) < 1e-8 ) return A + B / lam2;
+		return A + B / lam2 + C / lam4;
+	}
+
+	// Sprint 12: Jakob+Hanika spectral reflectance weight at arbitrary hero wavelength.
+	// When the payload carries a scalar hero wavelength (post-restructure), this replaces
+	// the per-channel evalSpectrum calls in dispersionTransmissionDirection.
+	float evalSpectrumAtHero( float lambdaNm ) {
+		return evalSpectrum( u_jakobCoeffs, lambdaNm );
+	}
+
+	// ── Sprint 8: Chromatic dispersion via Cauchy formula + Jakob+Hanika rider ──
+	//
+	// evalSpectrum: 6-instruction sigmoid polynomial evaluation.
+	// GLSL mirror of @vitrum/shared-samplers/src/jakobHanika.ts::evaluateSpectrum.
+	// sigmoid(x) = 0.5 + x * inversesqrt(1 + x²) * 0.5
+	//
+	// coeffs = (c0, c1, c2) from host-side rgbToSpectralCoefficients.
+	// lambda  = wavelength in nm.
+	float evalSpectrum( vec3 coeffs, float lambda ) {
+		float x = coeffs.x + coeffs.y * lambda + coeffs.z * lambda * lambda;
+		return 0.5 + x * inversesqrt( 1.0 + x * x ) * 0.5;
+	}
+
+	// Sprint 8: dielectric transmission with per-channel IOR via Cauchy formula.
+	// Stochastically selects one of three wavelengths {700, 550, 450} nm,
+	// weights that channel by 3× (importance-sampling the 1/3-probability choice),
+	// and refracts along the wavelength-specific direction.
+	//
+	// Gate: only active when u_dispersionStrength > 1e-4.  Falls back to the
+	// single-IOR path (transmissionDirection) when dispersion is disabled.
+	// This ensures non-bevel glass pays zero per-channel cost.
+	//
+	// Per plan/sprint-8-pt-fork-patch.md §1-2.
+	vec3 dispersionTransmissionDirection( vec3 wo, SurfaceRecord surf, inout vec3 channelMask ) {
+
+		const float LAMBDA_R = 700.0;  // nm — red channel
+		const float LAMBDA_G = 550.0;  // nm — green channel
+		const float LAMBDA_B = 450.0;  // nm — blue channel
+
+		// Per-channel spectral weight from Jakob+Hanika polynomial.
+		float specR = evalSpectrum( u_jakobCoeffs, LAMBDA_R );
+		float specG = evalSpectrum( u_jakobCoeffs, LAMBDA_G );
+		float specB = evalSpectrum( u_jakobCoeffs, LAMBDA_B );
+
+		// Per-channel IOR from Cauchy formula.
+		// u_dispersionStrength is the Cauchy B coefficient in nm² scale.
+		// u_ior0 is the base IOR at 589.3 nm.
+		float iorR = u_ior0 + u_dispersionStrength * specR / ( LAMBDA_R * LAMBDA_R );
+		float iorG = u_ior0 + u_dispersionStrength * specG / ( LAMBDA_G * LAMBDA_G );
+		float iorB = u_ior0 + u_dispersionStrength * specB / ( LAMBDA_B * LAMBDA_B );
+
+		// Stochastic wavelength selection: choose one of three channels (1/3 each).
+		// Weight the chosen channel by 3× to maintain unbiased expectation.
+		float choiceRand = rand( 23 );
+		float chosenIor;
+		if ( choiceRand < 1.0 / 3.0 ) {
+			chosenIor = iorR;
+			channelMask = vec3( 3.0, 0.0, 0.0 );
+		} else if ( choiceRand < 2.0 / 3.0 ) {
+			chosenIor = iorG;
+			channelMask = vec3( 0.0, 3.0, 0.0 );
+		} else {
+			chosenIor = iorB;
+			channelMask = vec3( 0.0, 0.0, 3.0 );
+		}
+
+		// Refract using the chosen per-wavelength IOR (front-face: air→glass = 1/ior).
+		bool frontFace = surf.frontFace;
+		float eta = frontFace ? 1.0 / chosenIor : chosenIor;
+
+		float roughness = surf.filteredRoughness;
+		vec3 halfVector = normalize( vec3( 0.0, 0.0, 1.0 ) + sampleSphere( rand2( 13 ) ) * roughness );
+		vec3 lightDirection = refract( normalize( - wo ), halfVector, eta );
+
+		if ( surf.thinFilm ) {
+			lightDirection = - refract( normalize( - lightDirection ), - vec3( 0.0, 0.0, 1.0 ), 1.0 / eta );
 		}
 		return normalize( lightDirection );
 
@@ -357,6 +471,29 @@ export const bsdf_functions = /* glsl */`
 
 	}
 
+	// Sprint 7: SSS single scatter via HG phase function.
+	// Called when a ray exits the back face of a TRANSLUCENT material
+	// (gated by u_sssSigmaT > 0 — see PhysicalPathTracingMaterial.js uniforms).
+	// The scatter position is sampled from an exponential distribution along
+	// the refracted direction; the scattered direction is sampled from HG.
+	// Mirrors @vitrum/shared-samplers/src/hgPhase.ts::sampleHG.
+	ScatterRecord sssSample( vec3 worldWo, SurfaceRecord surf ) {
+
+		float tScatter = sampleExponential( rand( 17 ), u_sssSigmaT, 1e6 );
+		float beerLambert = exp( - u_sssSigmaT * tScatter );
+
+		vec3 rd = normalize( - worldWo ); // refracted direction approximation
+		vec3 scatterDir = sampleHG_glsl( rand( 18 ), rand( 19 ), u_sssAnisotropyG, rd );
+
+		ScatterRecord sssRec;
+		sssRec.pdf = hg_phase( dot( rd, scatterDir ), u_sssAnisotropyG );
+		sssRec.specularPdf = 0.0;
+		sssRec.direction = scatterDir;
+		sssRec.color = u_sssAlbedo * beerLambert;
+		return sssRec;
+
+	}
+
 	ScatterRecord bsdfSample( vec3 worldWo, SurfaceRecord surf ) {
 
 		if ( surf.volumeParticle ) {
@@ -429,8 +566,22 @@ export const bsdf_functions = /* glsl */`
 
 		} else if ( r <= cdf[2] ) { // transmission / refraction
 
-			wi = transmissionDirection( wo, surf );
-			clearcoatWi = normalize( clearcoatInvBasis * normalize( normalBasis * wi ) );
+			// Sprint 8: per-channel IOR via Cauchy formula when dispersion is enabled.
+			// Gate: u_dispersionStrength > 1e-4 (non-bevel glass takes the fast path).
+			if ( u_dispersionStrength > 1e-4 ) {
+				vec3 channelMask = vec3( 1.0 );
+				wi = dispersionTransmissionDirection( wo, surf, channelMask );
+				clearcoatWi = normalize( clearcoatInvBasis * normalize( normalBasis * wi ) );
+				ScatterRecord dispResult;
+				dispResult.pdf = bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, dispResult.specularPdf, dispResult.color );
+				// Apply the 3× channel weight from stochastic wavelength selection.
+				dispResult.color *= channelMask;
+				dispResult.direction = normalize( surf.normalBasis * wi );
+				return dispResult;
+			} else {
+				wi = transmissionDirection( wo, surf );
+				clearcoatWi = normalize( clearcoatInvBasis * normalize( normalBasis * wi ) );
+			}
 
 		} else if ( r <= cdf[3] ) { // clearcoat
 

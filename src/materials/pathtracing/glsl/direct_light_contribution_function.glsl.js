@@ -7,11 +7,24 @@ export const direct_light_contribution_function = /*glsl*/`
 		// uniformly pick a light or environment map
 		if( lightsDenom != 0.0 && rand( 5 ) < float( lights.count ) / lightsDenom ) {
 
-			// sample a light or environment
-			LightRecord lightRec = randomLightSample( lights.tex, iesProfiles, lights.count, rayOrigin, rand3( 6 ) );
+			// sample a light or environment. Back-face candidates are resampled up to
+			// 4 attempts before giving up to zero contribution.
+			LightRecord lightRec;
+			bool foundFrontFacingLightSample = false;
+			for ( int attempt = 0; attempt < 4; attempt ++ ) {
 
-			bool isSampleBelowSurface = ! surf.volumeParticle && dot( surf.faceNormal, lightRec.direction ) < 0.0;
-			if ( isSampleBelowSurface ) {
+				lightRec = randomLightSample( lights.tex, iesProfiles, lights.count, rayOrigin, rand3( 6 + attempt ) );
+				bool isSampleBelowSurface = ! surf.volumeParticle && dot( surf.faceNormal, lightRec.direction ) < 0.0;
+				if ( ! isSampleBelowSurface ) {
+
+					foundFrontFacingLightSample = true;
+					break;
+
+				}
+
+			}
+
+			if ( ! foundFrontFacingLightSample ) {
 
 				lightRec.pdf = 0.0;
 

@@ -24,6 +24,7 @@ export const lights_struct = /* glsl */`
 		vec3 u;
 		vec3 v;
 		float area;
+		float power;
 
 		// spot light fields
 		float radius;
@@ -53,6 +54,7 @@ export const lights_struct = /* glsl */`
 		l.intensity = s1.a;
 
 		l.u = s2.rgb;
+		l.power = s2.a;
 		l.v = s3.rgb;
 		l.area = s3.a;
 
