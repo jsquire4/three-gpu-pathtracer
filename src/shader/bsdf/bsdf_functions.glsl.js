@@ -11,6 +11,15 @@ f90    : Amount of light reflected at grazing angles
 
 export const bsdf_functions = /* glsl */`
 
+	// Sprint 7: TRANSLUCENT material flag bit for SSS single-scatter path.
+	// Bit 4 of a hypothetical flags field; gated by u_sssSigmaT > 0 at the
+	// call site because the material struct does not yet carry per-material
+	// flag bits (they are packed into sample 14 in MaterialsTexture.js and
+	// the GLSL readMaterialInfo does not expose a raw flags word).
+	// TODO(sprint-7-flags): extend material_struct.glsl.js with a flags uint
+	// and pack TRANSLUCENT_BIT into MaterialsTexture.js sample 14.
+	const uint TRANSLUCENT_BIT = 0x10u;  // bit 4
+
 	// diffuse
 	float diffuseEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, inout vec3 color ) {
 
@@ -354,6 +363,29 @@ export const bsdf_functions = /* glsl */`
 
 		float specularPdf;
 		return bsdfEval( wo, clearcoatWo, wi, clearcoatWi, surf, diffuseWeight, specularWeight, transmissionWeight, clearcoatWeight, specularPdf, color );
+
+	}
+
+	// Sprint 7: SSS single scatter via HG phase function.
+	// Called when a ray exits the back face of a TRANSLUCENT material
+	// (gated by u_sssSigmaT > 0 — see PhysicalPathTracingMaterial.js uniforms).
+	// The scatter position is sampled from an exponential distribution along
+	// the refracted direction; the scattered direction is sampled from HG.
+	// Mirrors @vitrum/shared-samplers/src/hgPhase.ts::sampleHG.
+	ScatterRecord sssSample( vec3 worldWo, SurfaceRecord surf ) {
+
+		float tScatter = sampleExponential( rand( 17 ), u_sssSigmaT, 1e6 );
+		float beerLambert = exp( - u_sssSigmaT * tScatter );
+
+		vec3 rd = normalize( - worldWo ); // refracted direction approximation
+		vec3 scatterDir = sampleHG_glsl( rand( 18 ), rand( 19 ), u_sssAnisotropyG, rd );
+
+		ScatterRecord sssRec;
+		sssRec.pdf = hg_phase( dot( rd, scatterDir ), u_sssAnisotropyG );
+		sssRec.specularPdf = 0.0;
+		sssRec.direction = scatterDir;
+		sssRec.color = u_sssAlbedo * beerLambert;
+		return sssRec;
 
 	}
 

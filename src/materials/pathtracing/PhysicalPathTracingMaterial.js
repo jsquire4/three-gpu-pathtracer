@@ -1,4 +1,4 @@
-import { ClampToEdgeWrapping, HalfFloatType, Matrix4, Vector2 } from 'three';
+import { ClampToEdgeWrapping, HalfFloatType, Matrix4, Vector2, Vector3 } from 'three';
 import { MaterialBase } from '../MaterialBase.js';
 import {
 	MeshBVHUniformStruct, UIntVertexAttributeTexture,
@@ -21,6 +21,8 @@ import * as SamplingGLSL from '../../shader/sampling/index.js';
 import * as CommonGLSL from '../../shader/common/index.js';
 import * as RandomGLSL from '../../shader/rand/index.js';
 import * as BSDFGLSL from '../../shader/bsdf/index.js';
+// Sprint 7: uniform declarations for volume scatter + SSS
+// (u_volumeDensity, u_scatterAlbedo, u_anisotropyG, u_sssSigmaT, u_sssAlbedo, u_sssAnisotropyG)
 import * as PTBVHGLSL from '../../shader/bvh/index.js';
 
 // path tracer glsl
@@ -112,6 +114,32 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				sobolTexture: { value: null },
 				stratifiedTexture: { value: new StratifiedSamplesTexture() },
 				stratifiedOffsetTexture: { value: new BlueNoiseTexture( 64, 1 ) },
+
+				// Sprint 7: volume scatter uniforms (0 = disabled)
+				// u_volumeDensity > 0 activates homogeneous medium haze.
+				// u_scatterAlbedo = σ_s / σ_t per channel.
+				// u_anisotropyG   = HG anisotropy g for the volume phase function.
+				u_volumeDensity: { value: 0.0 },
+				u_scatterAlbedo: { value: new Vector3( 0.8, 0.85, 0.9 ) },
+				u_anisotropyG: { value: 0.0 },
+
+				// Sprint 7: per-material SSS uniforms (u_sssSigmaT = 0 disables SSS).
+				// u_sssSigmaT     = σ_t (scatter distance reciprocal).
+				// u_sssAlbedo     = single-scatter albedo.
+				// u_sssAnisotropyG = HG anisotropy g for SSS.
+				u_sssSigmaT: { value: 0.0 },
+				u_sssAlbedo: { value: new Vector3( 0.9, 0.9, 0.9 ) },
+				u_sssAnisotropyG: { value: 0.0 },
+
+				// Sprint 8: chromatic dispersion uniforms (u_dispersionStrength = 0 disables).
+				// u_ior0               = base IOR at 589.3 nm (sodium D line).
+				// u_dispersionStrength = Cauchy B coefficient in nm² scaled for slider.
+				//                        0 = no dispersion; 0.018 = lead crystal (bevel default).
+				// u_jakobCoeffs        = (c0, c1, c2) polynomial from rgbToSpectralCoefficients.
+				//                        defaults to (0,0,0) → flat 50% spectrum (no chromatic weight).
+				u_ior0: { value: 1.5 },
+				u_dispersionStrength: { value: 0.0 },
+				u_jakobCoeffs: { value: new Vector3( 0.0, 0.0, 0.0 ) },
 			},
 
 			vertexShader: /* glsl */`
@@ -249,11 +277,25 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				${ SamplingGLSL.equirect_functions }
 				${ SamplingGLSL.light_sampling_functions }
 
+				// Sprint 7: volume scatter + SSS uniforms
+				uniform float u_volumeDensity;
+				uniform vec3 u_scatterAlbedo;
+				uniform float u_anisotropyG;
+				uniform float u_sssSigmaT;
+				uniform vec3 u_sssAlbedo;
+				uniform float u_sssAnisotropyG;
+
+				// Sprint 8: chromatic dispersion uniforms
+				uniform float u_ior0;
+				uniform float u_dispersionStrength;
+				uniform vec3 u_jakobCoeffs;
+
 				${ PTBVHGLSL.inside_fog_volume_function }
 				${ BSDFGLSL.ggx_functions }
 				${ BSDFGLSL.sheen_functions }
 				${ BSDFGLSL.iridescence_functions }
 				${ BSDFGLSL.fog_functions }
+				${ BSDFGLSL.volume_march }
 				${ BSDFGLSL.bsdf_functions }
 
 				float applyFilteredGlossy( float roughness, float accumulatedRoughness ) {
@@ -340,6 +382,40 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						state.firstRay = i == 0 && state.transmissiveTraversals == transmissiveBounces;
 
 						int hitType = traceScene( ray, state.fogMaterial, surfaceHit );
+
+						// Sprint 7: Volume scatter event — homogeneous medium march.
+						// If u_volumeDensity > 0, sample a potential scatter distance.
+						// If tScatter < tSurface, a scatter event occurs before the surface hit.
+						// Fast path: skipped entirely when u_volumeDensity == 0 (no medium).
+						if ( u_volumeDensity > 0.0 ) {
+							float tSurface7 = hitType == NO_HIT ? 1e20 : surfaceHit.dist;
+							float tScatter = volumeMarch( ray.origin, ray.direction, tSurface7, rand( 20 ) );
+							if ( tScatter < tSurface7 ) {
+								// Scatter event before the surface — evaluate HG phase,
+								// sample new direction, apply transmittance weight.
+								vec3 scatterPos = ray.origin + tScatter * ray.direction;
+
+								// Choose new scattered direction via HG sampling.
+								vec3 scatterDir = sampleHG_glsl( rand( 21 ), rand( 22 ), u_anisotropyG, ray.direction );
+								float cosTheta = dot( ray.direction, scatterDir );
+								float phaseVal = hg_phase( cosTheta, u_anisotropyG );
+
+								// Beer-Lambert transmittance to scatter point.
+								float transmittance = exp( - u_volumeDensity * tScatter );
+
+								// Throughput update: albedo × phase / (pdf × transmittance normalisation).
+								// For single-scatter: throughput *= σ_s × phase(cosθ) / (σ_t × phase(cosθ))
+								//                               = σ_s / σ_t = scatterAlbedo
+								// The phase function cancels since we importance-sample from HG (pdf = phase).
+								state.throughputColor *= u_scatterAlbedo * transmittance;
+
+								// Advance ray from scatter position with new direction.
+								ray.origin = scatterPos;
+								ray.direction = scatterDir;
+								state.transmissiveRay = false;
+								continue;
+							}
+						}
 
 						// check if we intersect any lights and accumulate the light contribution
 						// TODO: we can add support for light surface rendering in the else condition if we
