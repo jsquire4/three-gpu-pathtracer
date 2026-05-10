@@ -76,6 +76,19 @@ export class WebGLPathTracer {
 
 	}
 
+	get tileRepeatFactors() {
+
+		return this._pathTracer.tileRepeatFactors;
+
+	}
+
+	set tileRepeatFactors( v ) {
+
+		this._pathTracer.tileRepeatFactors = v;
+		this._lowResPathTracer.tileRepeatFactors = v;
+
+	}
+
 	get tiles() {
 
 		return this._pathTracer.tiles;
@@ -155,6 +168,25 @@ export class WebGLPathTracer {
 
 		// initialize the scene so it doesn't fail
 		this.setScene( new Scene(), new PerspectiveCamera() );
+
+	}
+
+	/**
+	 * Enable HDR sum/count accumulation (additive blending). Display divides rgb by alpha when
+	 * displayDivideByAlpha is true (tonemapped preview on @vitrum ClampedInterpolationMaterial).
+	 */
+	configureAdditiveAccumulation( enabled, displayDivideByAlpha = false ) {
+
+		const pt = this._pathTracer;
+		const low = this._lowResPathTracer;
+		pt.additiveAccumulation = enabled;
+		low.additiveAccumulation = enabled;
+		pt.material.setDefine( 'FEATURE_ADDITIVE_ACCUM', enabled ? 1 : 0 );
+		if ( this._quad.material.uniforms.divideByAlpha ) {
+
+			this._quad.material.uniforms.divideByAlpha.value = displayDivideByAlpha ? 1 : 0;
+
+		}
 
 	}
 

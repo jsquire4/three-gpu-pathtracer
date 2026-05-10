@@ -64,6 +64,9 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 				DEBUG_MODE: 0,
 
+				// When 1, buffer accumulates sum(rgb)/count(alpha) via additive blending (host clears to 0).
+				FEATURE_ADDITIVE_ACCUM: 0,
+
 				ATTR_NORMAL: 0,
 				ATTR_TANGENT: 1,
 				ATTR_UV: 2,
@@ -490,7 +493,15 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 							if ( state.firstRay || state.transmissiveRay ) {
 
 								gl_FragColor.rgb += sampleBackground( ray.direction, rand2( 2 ) ) * throughputRgb;
+								#if FEATURE_ADDITIVE_ACCUM
+
+								gl_FragColor.a = 1.0;
+
+								#else
+
 								gl_FragColor.a = backgroundAlpha;
+
+								#endif
 
 							} else {
 
@@ -547,7 +558,15 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						// early out if this is a matte material
 						if ( material.matte && state.firstRay ) {
 
+							#if FEATURE_ADDITIVE_ACCUM
+
+							gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
+
+							#else
+
 							gl_FragColor = vec4( 0.0 );
+
+							#endif
 							break;
 
 						}
@@ -793,7 +812,15 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						}
 					}
 
+					#if FEATURE_ADDITIVE_ACCUM
+
+					gl_FragColor.a = 1.0;
+
+					#else
+
 					gl_FragColor.a *= opacity;
+
+					#endif
 
 					#if DEBUG_MODE == 1
 

@@ -121,6 +121,7 @@ export class WebGLPathTracer {
 	bounces: number;
 	transmissiveBounces: number;
 	filterGlossyFactor: number;
+	tileRepeatFactors: Uint8Array | null;
 	renderDelay: number;
 	minSamples: number;
 	fadeDuration: number;
@@ -136,6 +137,8 @@ export class WebGLPathTracer {
 
 	rasterizeSceneCallback: ( scene: Scene, camera: Camera ) => void;
 	renderToCanvasCallback: ( target: WebGLRenderTarget, renderer: WebGLRenderer, quad: FullScreenQuad ) => void;
+
+	configureAdditiveAccumulation( enabled: boolean, displayDivideByAlpha?: boolean ): void;
 
 	setBVHWorker( bvhWorker: BVHWorker ): void;
 	setScene(

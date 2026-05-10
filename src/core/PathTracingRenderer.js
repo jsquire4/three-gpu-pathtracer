@@ -1,4 +1,4 @@
-import { RGBAFormat, FloatType, Color, Vector2, WebGLRenderTarget, NoBlending, NormalBlending, Vector4, NearestFilter } from 'three';
+import { RGBAFormat, FloatType, Color, Vector2, WebGLRenderTarget, NoBlending, NormalBlending, CustomBlending, AddEquation, OneFactor, Vector4, NearestFilter } from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { BlendMaterial } from '../materials/fullscreen/BlendMaterial.js';
 import { SobolNumberMapGenerator } from '../utils/SobolNumberMapGenerator.js';
@@ -31,6 +31,17 @@ function* renderTask() {
 			material.blending = NoBlending;
 			material.opacity = 1;
 
+		} else if ( this.additiveAccumulation ) {
+
+			material.opacity = 1;
+			material.blending = CustomBlending;
+			material.blendEquationRGB = AddEquation;
+			material.blendEquationAlpha = AddEquation;
+			material.blendSrcRGB = OneFactor;
+			material.blendDstRGB = OneFactor;
+			material.blendSrcAlpha = OneFactor;
+			material.blendDstAlpha = OneFactor;
+
 		} else {
 
 			material.opacity = this._opacityFactor / ( this.samples + 1 );
@@ -45,12 +56,13 @@ function* renderTask() {
 		material.resolution.set( w * subW, h * subH );
 		material.sobolTexture = _sobolTarget.texture;
 		material.stratifiedTexture.init( 20, material.bounces + material.transmissiveBounces + 5 );
-		material.stratifiedTexture.next();
-		material.seed ++;
 
 		const tilesX = this.tiles.x || 1;
 		const tilesY = this.tiles.y || 1;
 		const totalTiles = tilesX * tilesY;
+
+		material.stratifiedTexture.next();
+		material.seed ++;
 
 		const pxSubW = Math.ceil( w * subW );
 		const pxSubH = Math.ceil( h * subH );
@@ -64,13 +76,6 @@ function* renderTask() {
 
 			for ( let x = 0; x < tilesX; x ++ ) {
 
-				// store og state
-				const ogRenderTarget = _renderer.getRenderTarget();
-				const ogAutoClear = _renderer.autoClear;
-				const ogScissorTest = _renderer.getScissorTest();
-				_renderer.getScissor( _ogScissor );
-				_renderer.getViewport( _ogViewport );
-
 				let tx = x;
 				let ty = y;
 				if ( ! this.stableTiles ) {
@@ -83,60 +88,79 @@ function* renderTask() {
 
 				}
 
-				// set the scissor and the viewport on the render target
-				// note that when using the webgl renderer set viewport the device pixel ratio
-				// is multiplied into the field causing some pixels to not be rendered
-				const reverseTy = tilesY - ty - 1;
-				_primaryTarget.scissor.set(
-					pxSubX + tx * pxTileW,
-					pxSubY + reverseTy * pxTileH,
-					Math.min( pxTileW, pxSubW - tx * pxTileW ),
-					Math.min( pxTileH, pxSubH - reverseTy * pxTileH ),
-				);
+				let repeats = 1;
+				if ( this.additiveAccumulation && this.tileRepeatFactors !== null ) {
 
-				_primaryTarget.viewport.set(
-					pxSubX,
-					pxSubY,
-					pxSubW,
-					pxSubH,
-				);
+					const idx = ty * tilesX + tx;
+					repeats = Math.max( 1, Math.min( 4, this.tileRepeatFactors[ idx ] || 1 ) );
 
-				// three.js renderer takes values relative to the current pixel ratio
-				_renderer.setRenderTarget( _primaryTarget );
-				_renderer.setScissorTest( true );
+				}
 
-				_renderer.autoClear = false;
-				_fsQuad.render( _renderer );
+				for ( let rep = 0; rep < repeats; rep ++ ) {
 
-				// reset original renderer state
-				_renderer.setViewport( _ogViewport );
-				_renderer.setScissor( _ogScissor );
-				_renderer.setScissorTest( ogScissorTest );
-				_renderer.setRenderTarget( ogRenderTarget );
-				_renderer.autoClear = ogAutoClear;
+					if ( this.additiveAccumulation && rep > 0 ) {
 
-				// swap and blend alpha targets
-				if ( alpha ) {
+						material.stratifiedTexture.next();
+						material.seed ++;
 
-					blendMaterial.target1 = blendTarget1.texture;
-					blendMaterial.target2 = _primaryTarget.texture;
+					}
 
-					_renderer.setRenderTarget( blendTarget2 );
-					_blendQuad.render( _renderer );
+					// store og state
+					const ogRenderTarget = _renderer.getRenderTarget();
+					const ogAutoClear = _renderer.autoClear;
+					const ogScissorTest = _renderer.getScissorTest();
+					_renderer.getScissor( _ogScissor );
+					_renderer.getViewport( _ogViewport );
+
+					const reverseTy = tilesY - ty - 1;
+					_primaryTarget.scissor.set(
+						pxSubX + tx * pxTileW,
+						pxSubY + reverseTy * pxTileH,
+						Math.min( pxTileW, pxSubW - tx * pxTileW ),
+						Math.min( pxTileH, pxSubH - reverseTy * pxTileH ),
+					);
+
+					_primaryTarget.viewport.set(
+						pxSubX,
+						pxSubY,
+						pxSubW,
+						pxSubH,
+					);
+
+					_renderer.setRenderTarget( _primaryTarget );
+					_renderer.setScissorTest( true );
+
+					_renderer.autoClear = false;
+					_fsQuad.render( _renderer );
+
+					_renderer.setViewport( _ogViewport );
+					_renderer.setScissor( _ogScissor );
+					_renderer.setScissorTest( ogScissorTest );
 					_renderer.setRenderTarget( ogRenderTarget );
+					_renderer.autoClear = ogAutoClear;
+
+					if ( alpha ) {
+
+						blendMaterial.target1 = blendTarget1.texture;
+						blendMaterial.target2 = _primaryTarget.texture;
+
+						_renderer.setRenderTarget( blendTarget2 );
+						_blendQuad.render( _renderer );
+						_renderer.setRenderTarget( ogRenderTarget );
+
+					}
+
+					yield;
 
 				}
 
 				this.samples += ( 1 / totalTiles );
 
-				// round the samples value if we've finished the tiles
 				if ( x === tilesX - 1 && y === tilesY - 1 ) {
 
 					this.samples = Math.round( this.samples );
 
 				}
-
-				yield;
 
 			}
 
@@ -213,6 +237,10 @@ export class PathTracingRenderer {
 		this.stableTiles = true;
 
 		this.samples = 0;
+		/** Sum/count HDR accumulation for unbiased per-pixel sample budgets (additive blending). */
+		this.additiveAccumulation = false;
+		/** Optional Uint8 per-tile repeat counts (1–4) when additiveAccumulation is true. */
+		this.tileRepeatFactors = null;
 		this._subframe = new Vector4( 0, 0, 1, 1 );
 		this._opacityFactor = 1.0;
 		this._renderer = renderer;

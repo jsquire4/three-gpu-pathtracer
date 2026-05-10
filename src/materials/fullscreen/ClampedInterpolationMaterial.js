@@ -40,6 +40,7 @@ export class ClampedInterpolationMaterial extends ShaderMaterial {
 
 				map: { value: null },
 				opacity: { value: 1 },
+				divideByAlpha: { value: 0 },
 
 			},
 
@@ -56,11 +57,18 @@ export class ClampedInterpolationMaterial extends ShaderMaterial {
 			fragmentShader: /* glsl */`
 				uniform sampler2D map;
 				uniform float opacity;
+				uniform float divideByAlpha;
 				varying vec2 vUv;
 
 				vec4 clampedTexelFatch( sampler2D map, ivec2 px, int lod ) {
 
 					vec4 res = texelFetch( map, ivec2( px.x, px.y ), 0 );
+
+					if ( divideByAlpha > 0.5 ) {
+
+						res.rgb /= max( res.a, 1e-6 );
+
+					}
 
 					#if defined( TONE_MAPPING )
 

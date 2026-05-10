@@ -1,4 +1,4 @@
-import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
+import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, CustomBlending, AddEquation, OneFactor, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
 import { SAH, MeshBVH, FloatVertexAttributeTexture, MeshBVHUniformStruct, UIntVertexAttributeTexture, BVHShaderGLSL } from 'three-mesh-bvh';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 
@@ -8168,6 +8168,9 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 
 				DEBUG_MODE: 0,
 
+				// When 1, buffer accumulates sum(rgb)/count(alpha) via additive blending (host clears to 0).
+				FEATURE_ADDITIVE_ACCUM: 0,
+
 				ATTR_NORMAL: 0,
 				ATTR_TANGENT: 1,
 				ATTR_UV: 2,
@@ -8594,7 +8597,15 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 							if ( state.firstRay || state.transmissiveRay ) {
 
 								gl_FragColor.rgb += sampleBackground( ray.direction, rand2( 2 ) ) * throughputRgb;
+								#if FEATURE_ADDITIVE_ACCUM
+
+								gl_FragColor.a = 1.0;
+
+								#else
+
 								gl_FragColor.a = backgroundAlpha;
+
+								#endif
 
 							} else {
 
@@ -8651,7 +8662,15 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 						// early out if this is a matte material
 						if ( material.matte && state.firstRay ) {
 
+							#if FEATURE_ADDITIVE_ACCUM
+
+							gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
+
+							#else
+
 							gl_FragColor = vec4( 0.0 );
+
+							#endif
 							break;
 
 						}
@@ -8897,7 +8916,15 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 						}
 					}
 
+					#if FEATURE_ADDITIVE_ACCUM
+
+					gl_FragColor.a = 1.0;
+
+					#else
+
 					gl_FragColor.a *= opacity;
+
+					#endif
 
 					#if DEBUG_MODE == 1
 
@@ -8951,6 +8978,17 @@ function* renderTask() {
 			material.blending = NoBlending;
 			material.opacity = 1;
 
+		} else if ( this.additiveAccumulation ) {
+
+			material.opacity = 1;
+			material.blending = CustomBlending;
+			material.blendEquationRGB = AddEquation;
+			material.blendEquationAlpha = AddEquation;
+			material.blendSrcRGB = OneFactor;
+			material.blendDstRGB = OneFactor;
+			material.blendSrcAlpha = OneFactor;
+			material.blendDstAlpha = OneFactor;
+
 		} else {
 
 			material.opacity = this._opacityFactor / ( this.samples + 1 );
@@ -8965,12 +9003,13 @@ function* renderTask() {
 		material.resolution.set( w * subW, h * subH );
 		material.sobolTexture = _sobolTarget.texture;
 		material.stratifiedTexture.init( 20, material.bounces + material.transmissiveBounces + 5 );
-		material.stratifiedTexture.next();
-		material.seed ++;
 
 		const tilesX = this.tiles.x || 1;
 		const tilesY = this.tiles.y || 1;
 		const totalTiles = tilesX * tilesY;
+
+		material.stratifiedTexture.next();
+		material.seed ++;
 
 		const pxSubW = Math.ceil( w * subW );
 		const pxSubH = Math.ceil( h * subH );
@@ -8984,13 +9023,6 @@ function* renderTask() {
 
 			for ( let x = 0; x < tilesX; x ++ ) {
 
-				// store og state
-				const ogRenderTarget = _renderer.getRenderTarget();
-				const ogAutoClear = _renderer.autoClear;
-				const ogScissorTest = _renderer.getScissorTest();
-				_renderer.getScissor( _ogScissor );
-				_renderer.getViewport( _ogViewport );
-
 				let tx = x;
 				let ty = y;
 				if ( ! this.stableTiles ) {
@@ -9003,60 +9035,79 @@ function* renderTask() {
 
 				}
 
-				// set the scissor and the viewport on the render target
-				// note that when using the webgl renderer set viewport the device pixel ratio
-				// is multiplied into the field causing some pixels to not be rendered
-				const reverseTy = tilesY - ty - 1;
-				_primaryTarget.scissor.set(
-					pxSubX + tx * pxTileW,
-					pxSubY + reverseTy * pxTileH,
-					Math.min( pxTileW, pxSubW - tx * pxTileW ),
-					Math.min( pxTileH, pxSubH - reverseTy * pxTileH ),
-				);
+				let repeats = 1;
+				if ( this.additiveAccumulation && this.tileRepeatFactors !== null ) {
 
-				_primaryTarget.viewport.set(
-					pxSubX,
-					pxSubY,
-					pxSubW,
-					pxSubH,
-				);
+					const idx = ty * tilesX + tx;
+					repeats = Math.max( 1, Math.min( 4, this.tileRepeatFactors[ idx ] || 1 ) );
 
-				// three.js renderer takes values relative to the current pixel ratio
-				_renderer.setRenderTarget( _primaryTarget );
-				_renderer.setScissorTest( true );
+				}
 
-				_renderer.autoClear = false;
-				_fsQuad.render( _renderer );
+				for ( let rep = 0; rep < repeats; rep ++ ) {
 
-				// reset original renderer state
-				_renderer.setViewport( _ogViewport );
-				_renderer.setScissor( _ogScissor );
-				_renderer.setScissorTest( ogScissorTest );
-				_renderer.setRenderTarget( ogRenderTarget );
-				_renderer.autoClear = ogAutoClear;
+					if ( this.additiveAccumulation && rep > 0 ) {
 
-				// swap and blend alpha targets
-				if ( alpha ) {
+						material.stratifiedTexture.next();
+						material.seed ++;
 
-					blendMaterial.target1 = blendTarget1.texture;
-					blendMaterial.target2 = _primaryTarget.texture;
+					}
 
-					_renderer.setRenderTarget( blendTarget2 );
-					_blendQuad.render( _renderer );
+					// store og state
+					const ogRenderTarget = _renderer.getRenderTarget();
+					const ogAutoClear = _renderer.autoClear;
+					const ogScissorTest = _renderer.getScissorTest();
+					_renderer.getScissor( _ogScissor );
+					_renderer.getViewport( _ogViewport );
+
+					const reverseTy = tilesY - ty - 1;
+					_primaryTarget.scissor.set(
+						pxSubX + tx * pxTileW,
+						pxSubY + reverseTy * pxTileH,
+						Math.min( pxTileW, pxSubW - tx * pxTileW ),
+						Math.min( pxTileH, pxSubH - reverseTy * pxTileH ),
+					);
+
+					_primaryTarget.viewport.set(
+						pxSubX,
+						pxSubY,
+						pxSubW,
+						pxSubH,
+					);
+
+					_renderer.setRenderTarget( _primaryTarget );
+					_renderer.setScissorTest( true );
+
+					_renderer.autoClear = false;
+					_fsQuad.render( _renderer );
+
+					_renderer.setViewport( _ogViewport );
+					_renderer.setScissor( _ogScissor );
+					_renderer.setScissorTest( ogScissorTest );
 					_renderer.setRenderTarget( ogRenderTarget );
+					_renderer.autoClear = ogAutoClear;
+
+					if ( alpha ) {
+
+						blendMaterial.target1 = blendTarget1.texture;
+						blendMaterial.target2 = _primaryTarget.texture;
+
+						_renderer.setRenderTarget( blendTarget2 );
+						_blendQuad.render( _renderer );
+						_renderer.setRenderTarget( ogRenderTarget );
+
+					}
+
+					yield;
 
 				}
 
 				this.samples += ( 1 / totalTiles );
 
-				// round the samples value if we've finished the tiles
 				if ( x === tilesX - 1 && y === tilesY - 1 ) {
 
 					this.samples = Math.round( this.samples );
 
 				}
-
-				yield;
 
 			}
 
@@ -9133,6 +9184,10 @@ class PathTracingRenderer {
 		this.stableTiles = true;
 
 		this.samples = 0;
+		/** Sum/count HDR accumulation for unbiased per-pixel sample budgets (additive blending). */
+		this.additiveAccumulation = false;
+		/** Optional Uint8 per-tile repeat counts (1–4) when additiveAccumulation is true. */
+		this.tileRepeatFactors = null;
 		this._subframe = new Vector4( 0, 0, 1, 1 );
 		this._opacityFactor = 1.0;
 		this._renderer = renderer;
@@ -9459,6 +9514,7 @@ class ClampedInterpolationMaterial extends ShaderMaterial {
 
 				map: { value: null },
 				opacity: { value: 1 },
+				divideByAlpha: { value: 0 },
 
 			},
 
@@ -9475,11 +9531,18 @@ class ClampedInterpolationMaterial extends ShaderMaterial {
 			fragmentShader: /* glsl */`
 				uniform sampler2D map;
 				uniform float opacity;
+				uniform float divideByAlpha;
 				varying vec2 vUv;
 
 				vec4 clampedTexelFatch( sampler2D map, ivec2 px, int lod ) {
 
 					vec4 res = texelFetch( map, ivec2( px.x, px.y ), 0 );
+
+					if ( divideByAlpha > 0.5 ) {
+
+						res.rgb /= max( res.a, 1e-6 );
+
+					}
 
 					#if defined( TONE_MAPPING )
 
@@ -9743,6 +9806,19 @@ class WebGLPathTracer {
 
 	}
 
+	get tileRepeatFactors() {
+
+		return this._pathTracer.tileRepeatFactors;
+
+	}
+
+	set tileRepeatFactors( v ) {
+
+		this._pathTracer.tileRepeatFactors = v;
+		this._lowResPathTracer.tileRepeatFactors = v;
+
+	}
+
 	get tiles() {
 
 		return this._pathTracer.tiles;
@@ -9822,6 +9898,25 @@ class WebGLPathTracer {
 
 		// initialize the scene so it doesn't fail
 		this.setScene( new Scene(), new PerspectiveCamera() );
+
+	}
+
+	/**
+	 * Enable HDR sum/count accumulation (additive blending). Display divides rgb by alpha when
+	 * displayDivideByAlpha is true (tonemapped preview on @vitrum ClampedInterpolationMaterial).
+	 */
+	configureAdditiveAccumulation( enabled, displayDivideByAlpha = false ) {
+
+		const pt = this._pathTracer;
+		const low = this._lowResPathTracer;
+		pt.additiveAccumulation = enabled;
+		low.additiveAccumulation = enabled;
+		pt.material.setDefine( 'FEATURE_ADDITIVE_ACCUM', enabled ? 1 : 0 );
+		if ( this._quad.material.uniforms.divideByAlpha ) {
+
+			this._quad.material.uniforms.divideByAlpha.value = displayDivideByAlpha ? 1 : 0;
+
+		}
 
 	}
 
