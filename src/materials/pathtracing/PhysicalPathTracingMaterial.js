@@ -555,21 +555,17 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 						#endif
 
+						#if FEATURE_ADDITIVE_ACCUM == 0
+
 						// early out if this is a matte material
 						if ( material.matte && state.firstRay ) {
 
-							#if FEATURE_ADDITIVE_ACCUM
-
-							gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
-
-							#else
-
 							gl_FragColor = vec4( 0.0 );
-
-							#endif
 							break;
 
 						}
+
+						#endif
 
 						// if we've determined that this is a shadow ray and we've hit an item with no shadow casting
 						// then skip it
