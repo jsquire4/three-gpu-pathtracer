@@ -2,7 +2,7 @@ export const thin_film_tmm = /* glsl */`
 
 	// Sprint 14 (RFE-14): 35-layer thin-film evaluator (TE approximation).
 	#define N_THIN_FILM_LAYERS 35
-	const uint MATERIAL_PIXELS = 76u;
+	const uint MATERIAL_PIXELS = 85u;
 	const uint THIN_FILM_SAMPLE_OFFSET = 28u;
 
 	float getMaterialStackScalar( uint materialIndex, uint scalarOffset ) {
@@ -24,15 +24,41 @@ export const thin_film_tmm = /* glsl */`
 		);
 	}
 
+	vec2 cSin( vec2 z ) {
+		float a = z.x;
+		float b = z.y;
+		return vec2(
+			sin( a ) * cosh( b ),
+			cos( a ) * sinh( b )
+		);
+	}
+
+	vec2 cCos( vec2 z ) {
+		float a = z.x;
+		float b = z.y;
+		return vec2(
+			cos( a ) * cosh( b ),
+			- sin( a ) * sinh( b )
+		);
+	}
+
 	// Returns vec2(R, T) for the hero wavelength.
-	vec2 thinFilmTMM( uint materialIndex, int thinFilmLayerCount, float lambdaNm, float substrateIor ) {
+	vec2 thinFilmTMM(
+		uint materialIndex,
+		int thinFilmLayerCount,
+		float lambdaNm,
+		float substrateIor,
+		float incidentIor,
+		float viewCosTheta
+	) {
 		if ( thinFilmLayerCount <= 0 ) {
 			return vec2( 0.0, 1.0 );
 		}
 
 		float lambdaUm = max( lambdaNm * 0.001, 1e-6 );
-		float eta0 = 1.0; // incident medium (air)
+		float eta0 = max( incidentIor, 1.0 );
 		float etaS = max( substrateIor, 1.0 );
+		float angleScale = clamp( viewCosTheta, 0.05, 1.0 );
 
 		vec2 m11 = vec2( 1.0, 0.0 );
 		vec2 m12 = vec2( 0.0, 0.0 );
@@ -42,15 +68,21 @@ export const thin_film_tmm = /* glsl */`
 		for ( int i = 0; i < N_THIN_FILM_LAYERS; i ++ ) {
 			if ( i >= thinFilmLayerCount ) break;
 
-			uint layerBase = uint( i ) * 2u;
+			uint layerBase = uint( i ) * 3u;
 			float nj = max( getMaterialStackScalar( materialIndex, layerBase ), 1.0 );
 			float djUm = max( getMaterialStackScalar( materialIndex, layerBase + 1u ) * 0.001, 0.0 );
-			float delta = 2.0 * PI * nj * djUm / lambdaUm;
+			float kj = max( getMaterialStackScalar( materialIndex, layerBase + 2u ), 0.0 );
+			vec2 etaJ = vec2( nj, - kj );
+			vec2 delta = etaJ * ( 2.0 * PI * djUm * angleScale / lambdaUm );
 
-			vec2 a11 = vec2( cos( delta ), 0.0 );
-			vec2 a12 = vec2( 0.0, - sin( delta ) / nj );
-			vec2 a21 = vec2( 0.0, - nj * sin( delta ) );
-			vec2 a22 = vec2( cos( delta ), 0.0 );
+			vec2 sinDelta = cSin( delta );
+			vec2 cosDelta = cCos( delta );
+			vec2 minusI = vec2( 0.0, -1.0 );
+
+			vec2 a11 = cosDelta;
+			vec2 a12 = cMul( minusI, cDiv( sinDelta, etaJ ) );
+			vec2 a21 = cMul( minusI, cMul( etaJ, sinDelta ) );
+			vec2 a22 = cosDelta;
 
 			vec2 nm11 = cMul( m11, a11 ) + cMul( m12, a21 );
 			vec2 nm12 = cMul( m11, a12 ) + cMul( m12, a22 );

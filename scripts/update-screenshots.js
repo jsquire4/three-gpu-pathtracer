@@ -11,7 +11,6 @@ const excludeList = [
 ];
 
 let totalTime = 0;
-const SAMPLES = 64;
 const argv = yargs( process.argv.slice( 2 ) )
 	.usage( 'Usage: $0 <command> [options]' )
 	.option( 'output-path', {
@@ -40,6 +39,16 @@ const argv = yargs( process.argv.slice( 2 ) )
 		describe: 'Start the local dev server before capturing.',
 		type: 'boolean',
 		default: false,
+	} )
+	.option( 'samples', {
+		describe: 'Samples per pixel for each screenshot.',
+		type: 'number',
+		default: 64,
+	} )
+	.option( 'timeout-ms', {
+		describe: 'Render-complete timeout per scenario in milliseconds.',
+		type: 'number',
+		default: 240000,
 	} )
 	.argv;
 
@@ -112,7 +121,14 @@ const argv = yargs( process.argv.slice( 2 ) )
 async function saveScreenshot( scenario, targetFolder ) {
 
 	const name = scenario.name;
-	const args = argv.headless ? [ '--use-gl=egl', '--headless' ] : [];
+	const args = argv.headless
+		? [
+			'--use-angle=swiftshader',
+			'--enable-unsafe-swiftshader',
+			'--ignore-gpu-blocklist',
+			'--disable-dev-shm-usage',
+		]
+		: [];
 	const browser = await puppeteer.launch( {
 
 		defaultViewport: null,
@@ -122,43 +138,74 @@ async function saveScreenshot( scenario, targetFolder ) {
 	} );
 
 	const page = await browser.newPage();
+	let fatalViewerError = null;
+	page.on( 'console', msg => {
 
-	await page.goto( `${ argv[ 'base-url' ] }/viewerTest.html?hideUI=true&scale=1&tiles=4&samples=${ SAMPLES }#${ name }` );
+		if ( msg.type() === 'error' ) {
 
-	try {
+			const text = msg.text();
+			console.error( `[viewer console] ${ text }` );
+			if (
+				/Shader Error|A WebGL context could not be created|Failed to create a WebGL2 context|Program Info Log/i.test( text )
+			) {
 
-		const startTime = performance.now();
-		await page.evaluate( () => {
+				fatalViewerError = new Error( `Viewer runtime error: ${ text }` );
 
-			return new Promise( ( resolve, reject ) => {
+			}
 
-				const TIMEOUT = 240000;
-				const handle = setTimeout( () => {
+		}
 
-					reject( new Error( `Failed to render in ${ ( 1e-3 * TIMEOUT ).toFixed( 2 ) }s.` ) );
+	} );
+	page.on( 'pageerror', err => {
 
-				}, TIMEOUT );
+		console.error( `[viewer pageerror] ${ err.message }` );
+		fatalViewerError = err;
 
-				self.addEventListener( 'render-complete', () => {
+	} );
 
-					clearTimeout( handle );
-					resolve();
+	await page.evaluateOnNewDocument( () => {
 
-				}, { once: true } );
+		window.__rftRenderComplete = false;
+		window.addEventListener( 'render-complete', () => {
 
-			} );
+			window.__rftRenderComplete = true;
 
 		} );
+
+	} );
+
+	await page.goto(
+		`${ argv[ 'base-url' ] }/viewerTest.html?hideUI=true&scale=1&tiles=4&samples=${ argv.samples }#${ name }`,
+		{ waitUntil: 'networkidle0' },
+	);
+
+	try {
+		if ( fatalViewerError ) {
+
+			throw fatalViewerError;
+
+		}
+
+		const startTime = performance.now();
+		await page.waitForFunction(
+			() => window.__rftRenderComplete === true,
+			{ timeout: argv[ 'timeout-ms' ] },
+		);
 
 		const deltaTime = performance.now() - startTime;
 		console.log( `\tin ${ ( 1e-3 * deltaTime ).toFixed( 2 ) }s` );
 		totalTime += deltaTime;
+		if ( fatalViewerError ) {
+
+			throw fatalViewerError;
+
+		}
 
 	} catch ( e ) {
 
 		console.error( e.message );
 		await browser.close();
-		return;
+		throw e;
 
 	}
 

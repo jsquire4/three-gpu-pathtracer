@@ -29,6 +29,8 @@ export const surface_record_struct = /* glsl */`
 		bool thinFilm;
 		float thinFilmEnabled;
 		float thinFilmLayerCount;
+		float thinFilmIncidentIor;
+		bool thinFilmAngleDependent;
 		float dispersionStrength;
 		float sssSigmaT;
 		float sssAnisotropyG;

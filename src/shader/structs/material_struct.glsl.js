@@ -72,6 +72,8 @@ export const material_struct = /* glsl */ `
 		float dispersionStrength;
 		float thinFilmEnabled;
 		float thinFilmLayerCount;
+		float thinFilmIncidentIor;
+		bool thinFilmAngleDependent;
 		bool hasSpectralAttenuation;
 		vec3 frontLayerTransmission;
 		float frontLayerRoughness;
@@ -115,7 +117,7 @@ export const material_struct = /* glsl */ `
 
 	Material readMaterialInfo( sampler2D tex, uint index ) {
 
-		uint i = index * 76u;
+		uint i = index * 85u;
 
 		vec4 s0 = texelFetch1D( tex, i + 0u );
 		vec4 s1 = texelFetch1D( tex, i + 1u );
@@ -208,6 +210,8 @@ export const material_struct = /* glsl */ `
 		m.thinFilmEnabled = s15.a;
 		m.sssAlbedo = s16.rgb;
 		m.thinFilmLayerCount = s16.a;
+		m.thinFilmIncidentIor = max( s17.r, 1.0 );
+		m.thinFilmAngleDependent = s17.g > 0.5;
 		uint featureFlags = uint( round( s17.a ) );
 		m.hasSpectralAttenuation = bool( featureFlags & 1u );
 		m.hasFrontLayer = bool( featureFlags & 2u );
@@ -217,7 +221,7 @@ export const material_struct = /* glsl */ `
 		m.backLayerTransmission = s19.rgb;
 		m.backLayerRoughness = s19.a;
 
-		uint firstTextureTransformIdx = i + 46u;
+		uint firstTextureTransformIdx = i + 55u;
 
 		// mat3( 1.0 ) is an identity matrix
 		m.mapTransform = m.map == - 1 ? mat3( 1.0 ) : readTextureTransform( tex, firstTextureTransformIdx );

@@ -38,37 +38,9 @@ export const util_functions = /* glsl */`
 		return heroScalarFromRgb( rgb, heroWavelength );
 	}
 
-	float sampleMaterialSpectralMu( uint materialIndex, float heroWavelength ) {
-		const uint MATERIAL_PIXELS = 76u;
-		const uint SPECTRAL_SAMPLE_OFFSET = 20u;
-		const uint SPECTRAL_SAMPLE_COUNT = 32u;
-		const float SPECTRAL_START_NM = 380.0;
-		const float SPECTRAL_END_NM = 780.0;
-		float t = clamp( ( heroWavelength - SPECTRAL_START_NM ) / ( SPECTRAL_END_NM - SPECTRAL_START_NM ), 0.0, 1.0 );
-		float f = t * float( SPECTRAL_SAMPLE_COUNT - 1u );
-		uint i0 = uint( floor( f ) );
-		uint i1 = min( i0 + 1u, SPECTRAL_SAMPLE_COUNT - 1u );
-		float lerpT = f - float( i0 );
-
-		uint sample0 = SPECTRAL_SAMPLE_OFFSET + i0 / 4u;
-		uint sample1 = SPECTRAL_SAMPLE_OFFSET + i1 / 4u;
-		vec4 s0 = texelFetch1D( materials, materialIndex * MATERIAL_PIXELS + sample0 );
-		vec4 s1 = texelFetch1D( materials, materialIndex * MATERIAL_PIXELS + sample1 );
-		uint c0 = i0 % 4u;
-		uint c1 = i1 % 4u;
-		float v0 = c0 == 0u ? s0.x : ( c0 == 1u ? s0.y : ( c0 == 2u ? s0.z : s0.w ) );
-		float v1 = c1 == 0u ? s1.x : ( c1 == 1u ? s1.y : ( c1 == 2u ? s1.z : s1.w ) );
-		return max( mix( v0, v1, lerpT ), 0.0 );
-	}
-
-	// Hero-wavelength Beer-Lambert attenuation using per-material spectral μ samples.
-	float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, bool hasSpectral, uint materialIndex, float heroWavelength ) {
-		if ( hasSpectral ) {
-			float mu = sampleMaterialSpectralMu( materialIndex, heroWavelength );
-			return exp( - mu * dist );
-		}
-		return heroScalarFromRgb( transmissionAttenuation( dist, attColor, attDist ), heroWavelength );
-	}
+float transmissionAttenuationHero( float dist, vec3 attColor, float attDist, bool hasSpectral, uint materialIndex, float heroWavelength ) {
+	return heroScalarFromRgb( transmissionAttenuation( dist, attColor, attDist ), heroWavelength );
+}
 
 	vec3 getHalfVector( vec3 wi, vec3 wo, float eta ) {
 

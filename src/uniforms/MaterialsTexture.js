@@ -2,7 +2,7 @@ import { DataTexture, RGBAFormat, ClampToEdgeWrapping, FloatType, FrontSide, Bac
 import { getTextureHash } from '../core/utils/sceneUpdateUtils.js';
 import { bufferToHash } from '../utils/bufferToHash.js';
 
-export const MATERIAL_PIXELS = 76;
+export const MATERIAL_PIXELS = 85;
 const MATERIAL_STRIDE = MATERIAL_PIXELS * 4;
 const TRANSLUCENT_BIT = 1 << 4;
 const FRAUNHOFER_C_NM = 656.3;
@@ -455,19 +455,21 @@ export class MaterialsTexture extends DataTexture {
 
 			floatArray[ index ++ ] = thinFilmLayerCount;
 
-			// sample 17 (feature flags only)
+			// sample 17 (thin-film stack metadata + feature flags)
 			const spectralCurve = getField( m.userData ?? {}, 'vitrumSpectralAttenuation', null );
 			const frontLayer = getField( m.userData ?? {}, 'vitrumFrontLayer', null );
 			const backLayer = getField( m.userData ?? {}, 'vitrumBackLayer', null );
 			const hasSpectral = spectralCurve && typeof spectralCurve === 'object';
 			const hasFrontLayer = frontLayer && typeof frontLayer === 'object';
 			const hasBackLayer = backLayer && typeof backLayer === 'object';
+			const thinFilmIncidentIor = Number( getField( thinFilmStack ?? {}, 'incidentIor', 1.0 ) );
+			const thinFilmAngleDependent = Boolean( getField( thinFilmStack ?? {}, 'angleDependent', false ) );
 			const packedFeatureFlags =
 				( hasSpectral ? 1 : 0 ) |
 				( hasFrontLayer ? 2 : 0 ) |
 				( hasBackLayer ? 4 : 0 );
-			floatArray[ index ++ ] = 0.0;
-			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = thinFilmIncidentIor;
+			floatArray[ index ++ ] = thinFilmAngleDependent ? 1.0 : 0.0;
 			floatArray[ index ++ ] = 0.0;
 			floatArray[ index ++ ] = packedFeatureFlags;
 
@@ -510,8 +512,8 @@ export class MaterialsTexture extends DataTexture {
 
 			}
 
-			// samples 28..45 (70 floats): per-material thin-film layer payload
-			// layout per layer: [ior, thicknessNm]
+			// samples 28..54 (108 floats): per-material thin-film layer payload
+			// layout per layer: [ior, thicknessNm, extinctionCoefficient]
 			const THIN_FILM_LAYER_LIMIT = 35;
 			for ( let layerIdx = 0; layerIdx < THIN_FILM_LAYER_LIMIT; layerIdx ++ ) {
 
@@ -520,9 +522,11 @@ export class MaterialsTexture extends DataTexture {
 					const layer = thinFilmLayers[ layerIdx ];
 					floatArray[ index ++ ] = Number( getField( layer ?? {}, 'ior', 1.0 ) );
 					floatArray[ index ++ ] = Number( getField( layer ?? {}, 'thicknessNm', 0.0 ) );
+					floatArray[ index ++ ] = Number( getField( layer ?? {}, 'extinctionCoefficient', 0.0 ) );
 
 				} else {
 
+					floatArray[ index ++ ] = 0.0;
 					floatArray[ index ++ ] = 0.0;
 					floatArray[ index ++ ] = 0.0;
 
@@ -530,11 +534,12 @@ export class MaterialsTexture extends DataTexture {
 
 			}
 
-			// pad the final 2 floats of sample 45
+			// pad the final 3 floats of sample 54
+			floatArray[ index ++ ] = 0.0;
 			floatArray[ index ++ ] = 0.0;
 			floatArray[ index ++ ] = 0.0;
 
-			// map transform 46
+			// map transform 55
 			index += writeTextureMatrixToArray( m, 'map', floatArray, index );
 
 			// metalnessMap transform 17
