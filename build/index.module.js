@@ -4928,6 +4928,8 @@ const light_sampling_functions = /* glsl */`
 		float pdf;
 		vec3 emission;
 		int type;
+		// P(chosen light | NEE chose the discrete lights branch). Uniform sampling uses 1/count.
+		float discretePdf;
 
 	};
 
@@ -4961,6 +4963,7 @@ const light_sampling_functions = /* glsl */`
 				lightRec.emission = light.color * light.intensity;
 				lightRec.direction = rayDirection;
 				lightRec.type = light.type;
+				lightRec.discretePdf = 1.0;
 
 			}
 
@@ -5004,6 +5007,7 @@ const light_sampling_functions = /* glsl */`
 
 		// TODO: the denominator is potentially zero
 		lightRec.pdf = lightDistSq / ( light.area * dot( direction, lightNormal ) );
+		lightRec.discretePdf = 1.0;
 
 		return lightRec;
 
@@ -5043,6 +5047,7 @@ const light_sampling_functions = /* glsl */`
 		lightRec.direction = direction;
 		lightRec.emission = light.color * light.intensity * distanceAttenuation * spotAttenuation;
 		lightRec.pdf = 1.0;
+		lightRec.discretePdf = 1.0;
 
 		return lightRec;
 
@@ -5052,8 +5057,48 @@ const light_sampling_functions = /* glsl */`
 
 		LightRecord result;
 
-		// pick a random light
-		uint l = uint( ruv.x * float( lightCount ) );
+		float invCount = 1.0 / max( float( lightCount ), 1.0 );
+		float sumPower = 0.0;
+		for ( uint ii = 0u; ii < lightCount; ii ++ ) {
+
+			Light tmpLight = readLightInfo( lights, ii );
+			sumPower += max( tmpLight.power, 1e-20 );
+
+		}
+
+		uint l = 0u;
+		float discretePdf = invCount;
+
+		if ( lightCount > 0u && sumPower > 1e-30 ) {
+
+			Light defaultPick = readLightInfo( lights, lightCount - 1u );
+			l = lightCount - 1u;
+			discretePdf = max( defaultPick.power, 1e-20 ) / sumPower;
+
+			float uPick = ruv.x * sumPower;
+			float cum = 0.0;
+			for ( uint ii = 0u; ii < lightCount; ii ++ ) {
+
+				Light tmpLight = readLightInfo( lights, ii );
+				float w = max( tmpLight.power, 1e-20 );
+				cum += w;
+				if ( uPick <= cum ) {
+
+					l = ii;
+					discretePdf = w / sumPower;
+					break;
+
+				}
+
+			}
+
+		} else if ( lightCount > 0u ) {
+
+			l = uint( ruv.x * float( lightCount ) );
+			discretePdf = invCount;
+
+		}
+
 		Light light = readLightInfo( lights, l );
 
 		if ( light.type == SPOT_LIGHT_TYPE ) {
@@ -5078,6 +5123,7 @@ const light_sampling_functions = /* glsl */`
 			rec.pdf = 1.0;
 			rec.emission = light.color * light.intensity * distanceFalloff;
 			rec.type = light.type;
+			rec.discretePdf = 1.0;
 			result = rec;
 
 		} else if ( light.type == DIR_LIGHT_TYPE ) {
@@ -5088,6 +5134,7 @@ const light_sampling_functions = /* glsl */`
 			rec.pdf = 1.0;
 			rec.emission = light.color * light.intensity;
 			rec.type = light.type;
+			rec.discretePdf = 1.0;
 
 			result = rec;
 
@@ -5098,6 +5145,7 @@ const light_sampling_functions = /* glsl */`
 
 		}
 
+		result.discretePdf = discretePdf;
 		return result;
 
 	}
@@ -7571,7 +7619,8 @@ const direct_light_contribution_function = /*glsl*/`
 				if ( lightMaterialPdf > 0.0 && isValidSampleColor ) {
 
 					// weight the direct light contribution
-					float lightPdf = lightRec.pdf / lightsDenom;
+					float lightPdf =
+						lightRec.pdf / lightsDenom * float( lights.count ) * lightRec.discretePdf;
 					float misWeight = lightRec.type == SPOT_LIGHT_TYPE || lightRec.type == DIR_LIGHT_TYPE || lightRec.type == POINT_LIGHT_TYPE ? 1.0 : misHeuristic( lightPdf, lightMaterialPdf );
 					result = attenuatedColor * lightRec.emission * throughputRgb * sampleColor * misWeight / lightPdf;
 
