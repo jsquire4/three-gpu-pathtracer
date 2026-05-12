@@ -156,7 +156,8 @@ function* renderTask() {
 
 				}
 
-				this.samples += ( 1 / totalTiles );
+				// Count proportional work: adaptive tiles may repeat 2–4× without starving convergence.
+				this.samples += ( repeats / totalTiles );
 
 				if ( x === tilesX - 1 && y === tilesY - 1 ) {
 
