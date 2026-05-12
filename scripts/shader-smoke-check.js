@@ -46,9 +46,10 @@ expectMatch(
 );
 expectNoMatch(directLight, /throughputColor/, 'direct_light_contribution still references throughputColor');
 expectMatch(materialMain, /uniform float uRadianceClamp;/, 'PhysicalPathTracingMaterial missing radiance clamp uniform');
+// Sprint 5: gl_FragColor renamed to gColor (MRT location 0). Pattern accepts both for forward compat.
 expectMatch(
 	materialMain,
-	/sampleLuminance\s*=\s*dot\s*\(\s*gl_FragColor\.rgb,\s*vec3\s*\(\s*0\.2126,\s*0\.7152,\s*0\.0722\s*\)\s*\)/,
+	/sampleLuminance\s*=\s*dot\s*\(\s*(?:gl_FragColor|gColor)\.rgb,\s*vec3\s*\(\s*0\.2126,\s*0\.7152,\s*0\.0722\s*\)\s*\)/,
 	'PhysicalPathTracingMaterial must clamp final sample luminance for firefly control',
 );
 expectMatch(spectral, /uniform int uSpectralRendering;/, 'spectral accumulator missing preview-mode gate uniform');

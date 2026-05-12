@@ -203,6 +203,16 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				vec4 envMapTexelToLinear( vec4 a ) { return a; }
 				#include <common>
 
+				// Sprint 5: MRT G-buffer outputs (Decision 12).
+				// location 0: gColor       — accumulated radiance + alpha (replaces gColor)
+				// location 1: gNormalDepth — world normal (xyz, encoded [0,1]) + linear depth (w)
+				// location 2: gAlbedo      — demodulated base color, no lighting
+				// When the host allocates a plain render target (non-MRT), only location 0 is
+				// written; locations 1 and 2 are harmlessly ignored by the driver.
+				layout(location = 0) out vec4 gColor;
+				layout(location = 1) out vec4 gNormalDepth;
+				layout(location = 2) out vec4 gAlbedo;
+
 				// bvh intersection
 				${ BVHShaderGLSL.common_functions }
 				${ BVHShaderGLSL.bvh_struct_definitions }
@@ -398,8 +408,18 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 							float( lights.count ) :
 							float( lights.count + 1u );
 
+					// Sprint 5: G-buffer accumulators (written at primary hit; sky fallback if NO_HIT).
+					// gNormalDepth.rgb = world normal encoded to [0,1] via (n*0.5+0.5).
+					//   Sky sentinel: vec3(0.5,1.0,0.5) decodes to world-up (0,1,0).
+					// gNormalDepth.w   = linear depth (camera-space, always positive); 0.0 for sky.
+					// gAlbedo.rgb      = demodulated base color (surf.color), no lighting.
+					bool gbufWritten = false;
+					vec3 gbufNormalEnc = vec3( 0.5, 1.0, 0.5 ); // sky sentinel
+					float gbufLinearDepth = 0.0;
+					vec3 gbufAlbedo = vec3( 0.0 );
+
 					// final color
-					gl_FragColor = vec4( 0, 0, 0, 1 );
+					gColor = vec4( 0, 0, 0, 1 );
 
 					// surface results
 					SurfaceHit surfaceHit;
@@ -480,11 +500,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 									// weight the contribution
 									// NOTE: Only area lights are supported for forward sampling and can be hit
 									float misWeight = misHeuristic( scatterRec.pdf, lightRec.pdf / lightsDenom );
-									gl_FragColor.rgb += lightRec.emission * throughputRgb * misWeight;
+									gColor.rgb += lightRec.emission * throughputRgb * misWeight;
 
 									#else
 
-									gl_FragColor.rgb += lightRec.emission * throughputRgb;
+									gColor.rgb += lightRec.emission * throughputRgb;
 
 									#endif
 
@@ -498,14 +518,14 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 							if ( state.firstRay || state.transmissiveRay ) {
 
-								gl_FragColor.rgb += sampleBackground( ray.direction, rand2( 2 ) ) * throughputRgb;
+								gColor.rgb += sampleBackground( ray.direction, rand2( 2 ) ) * throughputRgb;
 								#if FEATURE_ADDITIVE_ACCUM
 
-								gl_FragColor.a = 1.0;
+								gColor.a = 1.0;
 
 								#else
 
-								gl_FragColor.a = backgroundAlpha;
+								gColor.a = backgroundAlpha;
 
 								#endif
 
@@ -520,11 +540,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 								// and weight the contribution
 								float misWeight = misHeuristic( scatterRec.pdf, envPdf );
-								gl_FragColor.rgb += environmentIntensity * envColor * throughputRgb * misWeight;
+								gColor.rgb += environmentIntensity * envColor * throughputRgb * misWeight;
 
 								#else
 
-								gl_FragColor.rgb +=
+								gColor.rgb +=
 									environmentIntensity *
 									sampleEquirectColor( envMapInfo.map, envRotation3x3 * ray.direction ) *
 									throughputRgb;
@@ -570,7 +590,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						// early out if this is a matte material
 						if ( material.matte && state.firstRay ) {
 
-							gl_FragColor = vec4( 0.0 );
+							gColor = vec4( 0.0 );
 							break;
 
 						}
@@ -605,6 +625,26 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 						}
 
+						// Sprint 5: G-buffer primary-hit capture (once per path, at first real surface hit).
+						// Linear depth: project world-space hit point onto camera -Z axis.
+						//   camForward = camera's -Z world-space direction (Three.js convention).
+						//   camPos     = camera world-space position.
+						//   linearDepth = dot( hitPoint - camPos, camForward ) — always positive in front of camera.
+						if ( state.firstRay && ! gbufWritten ) {
+							vec3 hitPos = ray.origin + ray.direction * surfaceHit.dist;
+							// Camera forward direction in world space: cameraWorldMatrix * (0,0,-1,0)
+							vec3 camForward = normalize( ( cameraWorldMatrix * vec4( 0.0, 0.0, - 1.0, 0.0 ) ).xyz );
+							// Camera world position: cameraWorldMatrix * (0,0,0,1)
+							vec3 camPos = ( cameraWorldMatrix * vec4( 0.0, 0.0, 0.0, 1.0 ) ).xyz;
+							// Linear (positive) depth along camera -Z axis.
+							gbufLinearDepth = dot( hitPos - camPos, camForward );
+							// World normal encoded to [0,1] (decode: xyz*2-1).
+							gbufNormalEnc = surf.normal * 0.5 + 0.5;
+							// Demodulated base color: surf.color holds baseColor x ao (no lighting).
+							gbufAlbedo = surf.color;
+							gbufWritten = true;
+						}
+
 						// Sprint 7: gate SSS by per-material TRANSLUCENT_BIT and back-face traversal.
 						// Falls back to standard BSDF sampling for non-translucent materials.
 						bool canUseSss =
@@ -625,7 +665,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						// next event estimation
 						#if FEATURE_MIS
 
-						gl_FragColor.rgb += directLightContribution( - ray.direction, surf, state, hitPoint );
+						gColor.rgb += directLightContribution( - ray.direction, surf, state, hitPoint );
 
 						#endif
 
@@ -680,7 +720,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 											float focus = pow( max( dot( walkDir, - ray.direction ), 0.0 ), 10.0 );
 											float chainNorm = 1.0 / max( float( traversedChain + 1 ), 1.0 );
 											float manifoldWeight = focus * chainNorm * chainAttenuation;
-											gl_FragColor.rgb += throughputRgb * surf.color * manifoldWeight;
+											gColor.rgb += throughputRgb * surf.color * manifoldWeight;
 										}
 									}
 								}
@@ -715,7 +755,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 										}
 									}
 									float density = photonAccum / float( PHOTON_SAMPLES );
-									gl_FragColor.rgb += throughputRgb * surf.color * density * surf.transmission;
+									gColor.rgb += throughputRgb * surf.color * density * surf.transmission;
 								}
 							}
 						}
@@ -737,7 +777,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						}
 
 						// accumulate emissive color
-						gl_FragColor.rgb += ( surf.emission * throughputRgb );
+						gColor.rgb += ( surf.emission * throughputRgb );
 
 						// skip the sample if our PDF or ray is impossible
 						if ( scatterRec.pdf <= 0.0 || ! isDirectionValid( scatterRec.direction, surf.normal, surf.faceNormal ) ) {
@@ -813,19 +853,19 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 					}
 
 					if ( uRadianceClamp > 0.0 ) {
-						float sampleLuminance = dot( gl_FragColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+						float sampleLuminance = dot( gColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
 						if ( sampleLuminance > uRadianceClamp ) {
-							gl_FragColor.rgb *= uRadianceClamp / sampleLuminance;
+							gColor.rgb *= uRadianceClamp / sampleLuminance;
 						}
 					}
 
 					#if FEATURE_ADDITIVE_ACCUM
 
-					gl_FragColor.a = 1.0;
+					gColor.a = 1.0;
 
 					#else
 
-					gl_FragColor.a *= opacity;
+					gColor.a *= opacity;
 
 					#endif
 
@@ -833,14 +873,22 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 					// output the number of rays checked in the path and number of
 					// transmissive rays encountered.
-					gl_FragColor.rgb = vec3(
+					gColor.rgb = vec3(
 						float( state.depth ),
 						transmissiveBounces - state.transmissiveTraversals,
 						0.0
 					);
-					gl_FragColor.a = 1.0;
+					gColor.a = 1.0;
 
 					#endif
+
+					// Sprint 5: Write G-buffer outputs.
+					// If gbufWritten == false (sky/miss on first ray), sky sentinels are used:
+					//   gNormalDepth.rgb = (0.5,1.0,0.5) → decodes to world-up (0,1,0)
+					//   gNormalDepth.w   = 0.0 (sky depth sentinel, matches shared-denoisers convention)
+					//   gAlbedo.rgb      = (0,0,0) (no surface albedo)
+					gNormalDepth = vec4( gbufNormalEnc, gbufLinearDepth );
+					gAlbedo      = vec4( gbufAlbedo, 1.0 );
 
 				}
 
