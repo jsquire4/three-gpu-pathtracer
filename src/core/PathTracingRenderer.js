@@ -57,7 +57,18 @@ function* renderTask() {
 		const h = _primaryTarget.height;
 		material.resolution.set( w * subW, h * subH );
 		material.sobolTexture = _sobolTarget.texture;
-		material.stratifiedTexture.init( 20, material.bounces + material.transmissiveBounces + 5 );
+		// Stratified table dims (X) must cover every rand(v) call from the shader.
+		// As of Sprint 12 (hero-wavelength spectral) and Sprint 7 (SSS), the highest
+		// dimension index used is 47 (rand(47)). Pre-Sprint-12 the natural width was
+		// `bounces + transmissiveBounces + 5` (≈17), which silently truncated dims
+		// 18+ to undefined-but-typically-zero. With ANGLE/D3D11 that pinned the hero
+		// wavelength PRNG to `pixelSeed.r` per pixel — every sample for a given pixel
+		// drew the same λ, and λ ≈ Y-CMF mode ≈ 555 nm collapsed cornell-spectral to
+		// monochromatic green. Use 64 to leave headroom for future high-dim samplers.
+		material.stratifiedTexture.init(
+			Math.max( 20, material.bounces + material.transmissiveBounces + 5 ),
+			64,
+		);
 
 		const tilesX = this.tiles.x || 1;
 		const tilesY = this.tiles.y || 1;
