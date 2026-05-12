@@ -28,6 +28,10 @@ import * as PTBVHGLSL from '../../shader/bvh/index.js';
 // path tracer glsl
 import * as RenderGLSL from './glsl/index.js';
 
+// Sprint 10c: BDPT ping-pong texture size constants.
+// Texture: width = BDPT_MAX_LIGHT_BOUNCES = 3, height = 3 rows (one per RGBA32F texel group).
+const BDPT_MAX_LIGHT_BOUNCES = 3;
+
 export class PhysicalPathTracingMaterial extends MaterialBase {
 
 	onBeforeRender() {
@@ -35,6 +39,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 		this.setDefine( 'FEATURE_DOF', this.physicalCamera.bokehSize === 0 ? 0 : 1 );
 		this.setDefine( 'FEATURE_BACKGROUND_MAP', this.backgroundMap ? 1 : 0 );
 		this.setDefine( 'FEATURE_FOG', this.materials.features.isUsed( 'FOG' ) ? 1 : 0 );
+
+		// Sprint 10c: sync uBdptEnabled → FEATURE_BDPT define.
+		// FEATURE_BDPT == 1 compiles in the BDPT connection GLSL blocks.
+		// Off by default — only activate for PT_FINAL caustic renders.
+		this.setDefine( 'FEATURE_BDPT', this.uniforms.uBdptEnabled.value === true ? 1 : 0 );
 
 	}
 
@@ -51,6 +60,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				FEATURE_DOF: 1,
 				FEATURE_BACKGROUND_MAP: 0,
 				FEATURE_FOG: 1,
+
+				// Sprint 10c — BDPT integrator (off by default; opt-in for PT_FINAL caustic renders).
+				// When FEATURE_BDPT == 1 the main loop attempts one explicit connection per stored
+				// light vertex at each indirect bounce (depth > 0).
+				FEATURE_BDPT: 0,
 
 				// 0 = PCG
 				// 1 = Sobol
@@ -176,6 +190,19 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				// pathDepth > materialLodDepth. Default 2 = textures on primary
 				// hit and first indirect bounce only. Set 0 to disable LOD.
 				materialLodDepth: { value: 2 },
+
+				// Sprint 10c — BDPT uniforms.
+				// uBdptEnabled: mirrors the FEATURE_BDPT define (toggled at runtime via setDefine).
+				//   false = standard unidirectional PT (default, no overhead).
+				//   true  = BDPT connections active; host must supply uBdptLightPathTex each frame.
+				// uBdptMaxLightBounces: matches BDPT_MAX_LIGHT_BOUNCES constant = 3.
+				//   Reducing to 1 or 2 at runtime cuts per-sample cost at the expense of caustic depth.
+				// uBdptLightPathTex: RGBA32F ping-pong texture (width=3, height=3) written by the
+				//   host's light-subpath draw pass before the main accumulation loop.
+				//   null disables BDPT even when FEATURE_BDPT == 1 (safety guard).
+				uBdptEnabled: { value: false },
+				uBdptMaxLightBounces: { value: BDPT_MAX_LIGHT_BOUNCES },
+				uBdptLightPathTex: { value: null },
 			},
 
 			vertexShader: /* glsl */`
@@ -343,6 +370,19 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				uniform float uMneeMaxIterations;
 				uniform float uMneeMaxChainLength;
 
+				// Sprint 10c — BDPT uniforms.
+				// uBdptLightPathTex: RGBA32F ping-pong texture (width=BDPT_MAX_LIGHT_BOUNCES, height=3).
+				//   Rows: 0=position+kind, 1=normal+pdfFwd, 2=throughput+pdfRev.
+				//   Columns: 0..uBdptMaxLightBounces-1 (one per light subpath bounce).
+				// uBdptMaxLightBounces: how many stored light vertices to attempt connections with.
+				// uBdptEnabled is mirrored as FEATURE_BDPT define; uniform kept for runtime query.
+				#if FEATURE_BDPT
+
+				uniform sampler2D uBdptLightPathTex;
+				uniform int uBdptMaxLightBounces;
+
+				#endif
+
 				${ PTBVHGLSL.inside_fog_volume_function }
 				${ BSDFGLSL.ggx_functions }
 				${ BSDFGLSL.sheen_functions }
@@ -389,6 +429,16 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				${ RenderGLSL.attenuate_hit_function }
 				${ RenderGLSL.direct_light_contribution_function }
 				${ RenderGLSL.get_surface_record_function }
+
+				// Sprint 10c — BDPT GLSL blocks (compiled only when FEATURE_BDPT == 1).
+				// bdpt_light_subpath: writeLightSubpathVertex() helper + geometry term.
+				// bdpt_connection: evaluateBdptConnection() — shadow ray, BSDF eval, MIS weight.
+				#if FEATURE_BDPT
+
+				${ RenderGLSL.bdpt_light_subpath }
+				${ RenderGLSL.bdpt_connection }
+
+				#endif
 
 				void main() {
 
@@ -666,6 +716,31 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						#if FEATURE_MIS
 
 						gColor.rgb += directLightContribution( - ray.direction, surf, state, hitPoint );
+
+						#endif
+
+						// Sprint 10c — BDPT explicit connections (depth > 0 only; skip primary hit).
+						// At each indirect bounce the eye subpath attempts an explicit connection
+						// to every stored light-subpath vertex in uBdptLightPathTex.
+						// Primary hit (state.firstRay) is skipped to avoid double-counting with
+						// the unidirectional NEE path above (direct_light_contribution_function).
+						#if FEATURE_BDPT
+
+						if ( ! state.firstRay && uBdptLightPathTex != sampler2D( 0 ) ) {
+							vec3 throughputRgbBdpt = wavelengthToRGB( state.wavelength, state.throughput, state.wavelengthPdf );
+							for ( int bdptLvi = 0; bdptLvi < uBdptMaxLightBounces; bdptLvi ++ ) {
+								gColor.rgb += evaluateBdptConnection(
+									hitPoint,
+									surf.normal,
+									- ray.direction,    // worldWo at eye vertex
+									throughputRgbBdpt,
+									scatterRec.pdf,     // eyePdfFwd (forward scatter PDF)
+									surf,
+									state,
+									bdptLvi
+								);
+							}
+						}
 
 						#endif
 

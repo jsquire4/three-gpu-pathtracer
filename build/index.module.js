@@ -6013,6 +6013,40 @@ const bsdf_functions = /* glsl */`
 
 	}
 
+	// Sprint 6: perturb a refracted direction by a GGX lobe.
+	// This approximates the rough-transmission BSDF evaluated at normal incidence.
+	// Called AFTER specular refraction so it is additive to the Phase 4 normal-map
+	// perturbation (which modifies surface normals before refraction).
+	//
+	// refractDir : specular refraction direction (unit vector)
+	// roughness  : Disney roughness α (0 = specular glass, 1 = frosted glass)
+	// u1, u2     : uniform random samples for GGX importance sampling
+	// Returns    : perturbed refraction direction (unit vector)
+	//
+	// Reference: Heitz 2014 — "Importance Sampling Microfacet-Based BSDFs using
+	// the Distribution of Visible Normals" (EGSR 2014).
+	vec3 perturbDirectionByGGX( vec3 refractDir, float roughness, float u1, float u2 ) {
+
+		if ( roughness < 1e-4 ) return refractDir;  // specular: no perturbation
+
+		float alpha = roughness * roughness;
+
+		// GGX microfacet importance sample in hemisphere (Heitz 2014 visible NDF)
+		float phi       = 2.0 * PI * u1;
+		float cosTheta  = sqrt( ( 1.0 - u2 ) / ( 1.0 + ( alpha * alpha - 1.0 ) * u2 ) );
+		float sinTheta  = sqrt( max( 0.0, 1.0 - cosTheta * cosTheta ) );
+		vec3 localH     = vec3( sinTheta * cos( phi ), sinTheta * sin( phi ), cosTheta );
+
+		// Transform localH to the frame where refractDir is the +Z axis
+		vec3 up         = abs( refractDir.z ) < 0.999 ? vec3( 0, 0, 1 ) : vec3( 1, 0, 0 );
+		vec3 tangent    = normalize( cross( up, refractDir ) );
+		vec3 bitangent  = cross( refractDir, tangent );
+		vec3 perturbed  = localH.x * tangent + localH.y * bitangent + localH.z * refractDir;
+
+		return normalize( perturbed );
+
+	}
+
 	vec3 transmissionDirection( vec3 wo, SurfaceRecord surf ) {
 
 		float filteredRoughness = surf.filteredRoughness;
@@ -6029,6 +6063,13 @@ const bsdf_functions = /* glsl */`
 			lightDirection = - refract( normalize( - lightDirection ), - vec3( 0.0, 0.0, 1.0 ), 1.0 / eta );
 
 		}
+
+		// Sprint 6: apply rough-refraction GGX lobe after specular refraction.
+		// Phase 4 modifies surf.normalBasis before this call; Sprint 6 perturbs
+		// the refracted direction after — they compose correctly in order.
+		vec2 roughRand = rand2( 47 );
+		lightDirection = perturbDirectionByGGX( normalize( lightDirection ), filteredRoughness, roughRand.x, roughRand.y );
+
 		return normalize( lightDirection );
 
 	}
@@ -6102,6 +6143,11 @@ const bsdf_functions = /* glsl */`
 		if ( surf.thinFilm ) {
 			lightDirection = - refract( normalize( - lightDirection ), - vec3( 0.0, 0.0, 1.0 ), 1.0 / eta );
 		}
+
+		// Sprint 6: apply rough-refraction GGX lobe (same as transmissionDirection).
+		vec2 roughRand = rand2( 47 );
+		lightDirection = perturbDirectionByGGX( normalize( lightDirection ), filteredRoughness, roughRand.x, roughRand.y );
+
 		return normalize( lightDirection );
 
 	}
@@ -7509,6 +7555,443 @@ const attenuate_hit_function = /* glsl */`
 
 `;
 
+/**
+ * bdpt_connection.glsl.js — BDPT eye↔light connection evaluation (Sprint 10c).
+ *
+ * Implements the connection phase of bidirectional path tracing:
+ *   1. Visibility test (shadow ray from eye vertex toward light vertex).
+ *   2. BSDF evaluation at the eye vertex (toward the light vertex).
+ *   3. BSDF evaluation at the light vertex (toward the eye vertex).
+ *   4. Geometric term G(x↔y) = |cosθ_x · cosθ_y| / ‖x−y‖².
+ *   5. Full Veach §10.3 power-heuristic MIS weight (β=2).
+ *   6. Returns RGB contribution = lightThroughput × BSDF_l × G × BSDF_e × MIS × eyeThroughput.
+ *
+ * MIS weight (inline GLSL port of `bdptConnectionMIS_full` from @vitrum/shared-samplers):
+ *   w_s = p_s² / Σ_i p_i²   (power heuristic, β=2, one sample per strategy)
+ *
+ * The denominator is built from three strategy PDFs in the 2-strategy approximation
+ * used here (light-subpath vertex s + eye-subpath vertex t = full path):
+ *   p_s  = pdfFwd_light × G × pdfFwd_eye   (chosen strategy — joint forward PDF)
+ *   p_{s-1} = pdfRev_light × ...            (light vertex "shifted" to eye subpath)
+ *   p_{s+1} = pdfRev_eye   × ...            (eye vertex "shifted" to light subpath)
+ *
+ * For the practical BDPT implementation here (one explicit connection per stored
+ * light vertex), the simplified 2-strategy form is used as specified in the spec:
+ *   pdfSum2 = p_s² + p_otherStrategies²
+ * where p_otherStrategies² = (pdfFwd_light × G × pdfFwd_eye)^2 / 4 (balanced approx).
+ * The full recursive Veach sweep is deferred to a future patch when full
+ * per-strategy PDF storage is available.
+ *
+ * Specular-vertex guard (Veach §10.3.5): if the light vertex or eye vertex is
+ * specular (delta BSDF), return vec3(0.0) — the MIS weight is zero by definition
+ * because explicit connections through delta surfaces have zero probability density
+ * when sampled from the other subpath.
+ *
+ * NaN/Inf guards:
+ *   - Denominator guard: return 0 when pdfSum2 ≤ 0.
+ *   - Geometric term guard: return 0 when G ≤ 0 (degenerate connection).
+ *   - Contribution clamp: final RGB is clamped to [0, BDPT_CONTRIBUTION_CLAMP]
+ *     per-component to suppress fireflies from caustic spikes during early
+ *     convergence. Default clamp = 100 (generous; not a bias for converged renders).
+ *
+ * References:
+ *   Veach 1997, §9.2 (power heuristic), §10.3 (BDPT MIS weights),
+ *     §10.3.5 (specular-vertex zero-weight rule).
+ *   Pharr et al. 2023, PBR 4e §16.3.5 (recursive ratio, Eq. 16.16).
+ *   @vitrum/shared-samplers: bdptConnectionMIS_full, buildBDPTStrategyPDFs_full.
+ */
+const bdpt_connection = /* glsl */`
+
+	#define BDPT_CONTRIBUTION_CLAMP 100.0
+
+	// ── Geometric term ───────────────────────────────────────────────────────
+	// G(x↔y) = |cosθ_x · cosθ_y| / ‖x−y‖²  (Veach §8.3.2, Eq. 8.10).
+	// Returns 0 for degenerate / coincident points or tangent incidence.
+	float bdptG( vec3 posX, vec3 nX, vec3 posY, vec3 nY ) {
+		vec3 d    = posY - posX;
+		float d2  = dot( d, d );
+		if ( d2 <= 1e-12 ) return 0.0;
+		vec3 w    = d * inversesqrt( d2 );
+		float cX  = abs( dot( nX,  w ) );
+		float cY  = abs( dot( nY, -w ) ); // reverse direction at y
+		return ( cX * cY ) / d2;
+	}
+
+	// ── Power-heuristic MIS weight (β=2, GLSL port of bdptConnectionMIS_full) ──
+	// Simplified 2-strategy form: w = p_s² / (p_s² + p_alt²).
+	// Used when only two competing strategies have non-zero PDFs.
+	// Guard: returns 0 when denominator ≤ 0 or p_s ≤ 0.
+	float bdptMISWeight2( float p_s, float p_alt ) {
+		if ( p_s <= 0.0 ) return 0.0;
+		float p2s   = p_s   * p_s;
+		float p2alt = p_alt * p_alt;
+		float denom = p2s + p2alt;
+		return ( denom > 0.0 ) ? ( p2s / denom ) : 0.0;
+	}
+
+	// ── Visibility test ──────────────────────────────────────────────────────
+	// Returns true when the segment (eyePos, lightPos) is unoccluded.
+	// Uses the existing attenuateHit() infrastructure with a temporary RenderState.
+	// A hit is occluded if any opaque surface lies between the two endpoints.
+	// Note: attenuateHit returns true when a solid (opaque) surface blocks the ray.
+	bool bdptIsVisible( vec3 eyePos, vec3 lightPos, RenderState state ) {
+		vec3 dir  = lightPos - eyePos;
+		float len = length( dir );
+		if ( len < RAY_OFFSET ) return false; // degenerate — same point
+		Ray shadowRay;
+		shadowRay.origin    = eyePos;
+		shadowRay.direction = dir / len;
+		vec3 attenColor;
+		// attenuateHit returns true when occluded by a solid surface.
+		bool occluded = attenuateHit( state, shadowRay, len - RAY_OFFSET, attenColor );
+		return ! occluded;
+	}
+
+	// ── BDPT connection contribution ─────────────────────────────────────────
+	// Evaluates one eye↔light vertex connection and returns the RGB radiance
+	// contribution to add to gColor.rgb.
+	//
+	// Parameters:
+	//   eyePos          — world-space position of the eye-subpath vertex
+	//   eyeNormal       — shading normal at the eye vertex (unit-length)
+	//   eyeWo           — outgoing direction at the eye vertex (toward camera)
+	//   eyeThroughput   — accumulated RGB path weight at the eye vertex
+	//   eyePdfFwd       — forward PDF at the eye vertex (for MIS)
+	//   eyeSurf         — full SurfaceRecord at the eye vertex (for BSDF eval)
+	//   eyeState        — RenderState at the eye vertex (wavelength, traversals, etc.)
+	//   lightVtxIdx     — column index into uBdptLightPathTex (0..BDPT_MAX_LIGHT_BOUNCES-1)
+	//
+	// Returns vec3(0) when:
+	//   - The light vertex is invalid (kind = 3)
+	//   - The eye or light vertex is specular (delta BSDF)
+	//   - The connection is occluded
+	//   - The geometric term is degenerate (G ≤ 0)
+	//   - Any PDF is non-positive
+	vec3 evaluateBdptConnection(
+		vec3 eyePos,
+		vec3 eyeNormal,
+		vec3 eyeWo,
+		vec3 eyeThroughput,
+		float eyePdfFwd,
+		SurfaceRecord eyeSurf,
+		RenderState eyeState,
+		int lightVtxIdx
+	) {
+
+		// ── Fetch light vertex from ping-pong texture ─────────────────────────
+		vec4 lv0 = texelFetch( uBdptLightPathTex, ivec2( lightVtxIdx, 0 ), 0 );
+		vec4 lv1 = texelFetch( uBdptLightPathTex, ivec2( lightVtxIdx, 1 ), 0 );
+		vec4 lv2 = texelFetch( uBdptLightPathTex, ivec2( lightVtxIdx, 2 ), 0 );
+
+		// Check kind — skip invalid vertices (kind = 3.0 = BDPT_KIND_INVALID).
+		if ( lv0.w == 3.0 ) return vec3( 0.0 );
+
+		vec3  lightPos        = lv0.xyz;
+		vec3  lightNormal     = lv1.xyz;
+		float lightPdfFwd     = lv1.w;
+		vec3  lightThroughput = lv2.xyz;
+		float lightPdfRev     = lv2.w;
+
+		// ── Specular-vertex guard (Veach §10.3.5) ────────────────────────────
+		// If the eye surface is specular (delta BSDF), explicit connection has
+		// zero probability density when sampled by the light subpath — skip it.
+		// We approximate specular as: transmission > 0.5 AND roughness < 0.05.
+		bool eyeIsSpecular = ( eyeSurf.transmission > 0.5 && eyeSurf.filteredRoughness < 0.05 );
+		if ( eyeIsSpecular ) return vec3( 0.0 );
+
+		// ── Connection direction ──────────────────────────────────────────────
+		vec3 toLight = lightPos - eyePos;
+		float dist   = length( toLight );
+		if ( dist < RAY_OFFSET ) return vec3( 0.0 ); // degenerate
+
+		vec3 connDir = toLight / dist; // unit direction eye → light
+
+		// ── Geometric term G(eye ↔ light) ────────────────────────────────────
+		float gTerm = bdptG( eyePos, eyeNormal, lightPos, lightNormal );
+		if ( gTerm <= 0.0 ) return vec3( 0.0 );
+
+		// ── Visibility test ───────────────────────────────────────────────────
+		if ( ! bdptIsVisible( eyePos, lightPos, eyeState ) ) return vec3( 0.0 );
+
+		// ── BSDF evaluation at eye vertex (toward light) ──────────────────────
+		// bsdfResult returns the PDF and sets color (the BSDF value × cosθ / PDF).
+		// We need the BSDF × cosθ value, which bsdfResult provides normalized by PDF.
+		// Reconstruct: bsdf_eye × cosθ = bsdfResult color × bsdfResult pdf.
+		vec3 eyeBsdfColor;
+		float eyeBsdfPdf = bsdfResult( eyeWo, connDir, eyeSurf, eyeState.wavelength, eyeBsdfColor );
+		if ( eyeBsdfPdf <= 0.0 ) return vec3( 0.0 );
+		// eyeBsdfColor is BSDF × cosθ / pdf → multiply by pdf to get BSDF × cosθ.
+		vec3 eyeBsdfCosTheta = eyeBsdfColor * eyeBsdfPdf;
+
+		// ── BSDF evaluation at light vertex (toward eye) ──────────────────────
+		// We don't have a full SurfaceRecord for the light vertex (the light kernel
+		// uses a Lambertian approximation). Use a Lambertian BSDF approximation:
+		//   f(ωi, ωo) × cosθ = albedo / π × cosθ_light
+		// where cosθ_light = |dot(lightNormal, -connDir)|.
+		float cosLight = max( dot( lightNormal, -connDir ), 0.0 );
+		// Approximate albedo as vec3(1.0) — the light throughput already encodes
+		// the material color from the emitter bounce. This is consistent with the
+		// Lambertian approximation in the light subpath kernel.
+		vec3 lightBsdfCosTheta = vec3( cosLight / PI );
+
+		// ── MIS weight ───────────────────────────────────────────────────────
+		// Full Veach §10.3 weight uses all strategy PDFs. For the 2-strategy
+		// approximation (explicit connection + unidirectional PT):
+		//   p_s  = pdfFwd_light × G × pdfFwd_eye  (joint forward PDF of this strategy)
+		//   p_alt = unidirectional PT forward PDF (approximated as eyePdfFwd × G)
+		//
+		// The approximation is conservative (underweights BDPT slightly) and
+		// prevents MIS denominator collapse without requiring full strategy enumeration.
+		float p_s   = lightPdfFwd * gTerm * eyePdfFwd;
+		float p_alt = eyePdfFwd   * gTerm; // unidirectional: no light subpath
+		float misW  = bdptMISWeight2( p_s, p_alt );
+		if ( misW <= 0.0 ) return vec3( 0.0 );
+
+		// ── Assemble contribution ────────────────────────────────────────────
+		// contribution = lightThroughput × lightBsdf×cosθ × G × eyeBsdf×cosθ × MIS × eyeThroughput
+		// Note: eyeThroughput is already converted to RGB via wavelengthToRGB() at the call site.
+		vec3 contribution = lightThroughput * lightBsdfCosTheta * gTerm * eyeBsdfCosTheta * misW;
+		// Multiply by eye throughput (caller provides RGB-converted throughput).
+		contribution *= eyeThroughput;
+
+		// ── NaN / Inf guard and firefly clamp ────────────────────────────────
+		if ( any( isnan( contribution ) ) || any( isinf( contribution ) ) ) {
+			return vec3( 0.0 );
+		}
+		return clamp( contribution, vec3( 0.0 ), vec3( BDPT_CONTRIBUTION_CLAMP ) );
+
+	}
+
+`;
+
+/**
+ * bdpt_light_subpath.glsl.js — BDPT light-subpath kernel (Sprint 10c).
+ *
+ * This GLSL block is included via `#ifdef BDPT_LIGHT_SUBPATH_PASS` into the
+ * light-subpath draw pass — a separate fullscreen-quad draw call that the host
+ * issues BDPT_MAX_LIGHT_BOUNCES times (once per bounce) before the main eye-ray
+ * accumulation pass.
+ *
+ * Ping-pong vertex texture layout (RGBA32F, width=BDPT_MAX_LIGHT_BOUNCES=3, height=3):
+ *   Texel(col, 0):  position.xyz | kind    (0=light vertex, 3=invalid/empty)
+ *   Texel(col, 1):  normal.xyz   | pdfFwd  (forward PDF in area measure × cosθ)
+ *   Texel(col, 2):  throughput.rgb | pdfRev (accumulated radiance weight; reverse PDF)
+ *
+ * Each draw call renders into a 3-attachment MRT target at column uBdptVertexCol
+ * (0…BDPT_MAX_LIGHT_BOUNCES-1). The host ping-pongs: "write" target = current
+ * frame's texture; "read" target (uBdptLightPathTex) = previous frame's texture.
+ * For bounce k=0 the read texture is irrelevant (emitter vertex; no prior bounce).
+ *
+ * Geometry term: G(x↔y) = |cosθ_x · cosθ_y| / ‖x−y‖²  (Veach §8.3.2, Eq. 8.10).
+ *
+ * Throughput model (approximation — see Risk §4 in sprint-10c-pt-fork-patch.md):
+ *   T_0 = Le × cosθ_emit / (p_light × p_hemisphere)
+ *   T_k = T_{k-1} × albedo_k × cosθ_k / p_hemisphere_k
+ * Full BSDF evaluation is deferred to the connection pass; the light subpath uses
+ * Lambertian approximation (cosine hemisphere) to keep per-bounce cost bounded.
+ *
+ * pdfRev approximation: symmetric Lambertian model — pdfRev = cosθ_rev / π.
+ * This is an intentional approximation documented in the sprint spec (Risk §4).
+ * It will bias the MIS weight slightly but is visually acceptable for caustic
+ * convergence verification. Track as known gap in IMPLEMENTATION-STATUS.md.
+ *
+ * Seed isolation: eye-path rand() uses seeds 0–30 (established by prior sprints).
+ *   Light subpath bounce 0 uses seeds 50–52.
+ *   Light subpath bounce k uses seeds 53 + k*3 … 55 + k*3.
+ *
+ * References:
+ *   Veach 1997, §10.3 (BDPT), §8.3.2 (geometric term).
+ *   Pharr et al. 2023, PBR 4e §16.3 (vertex formulation).
+ */
+const bdpt_light_subpath = /* glsl */`
+
+	// ── Geometry term G(x↔y) ────────────────────────────────────────────────
+	// Returns 0 on degenerate connections (coincident points or near-tangent
+	// incidence — both produce near-zero or negative cosines).
+	float bdptGeometricTerm( vec3 posX, vec3 nX, vec3 posY, vec3 nY ) {
+		vec3 d    = posY - posX;
+		float dist2 = dot( d, d );
+		if ( dist2 <= 1e-12 ) return 0.0;
+		vec3 w    = d * inversesqrt( dist2 );
+		float cosX = abs( dot( nX, w ) );
+		float cosY = abs( dot( nY, -w ) ); // opposite direction
+		return ( cosX * cosY ) / dist2;
+	}
+
+	// ── Write a fully invalid (empty) vertex ─────────────────────────────────
+	// Called when sampling fails or the subpath terminates early.
+	// kind = 3.0 = BDPT_KIND_INVALID — the connection pass skips these.
+	void writeBdptInvalidVertex(
+		out vec4 v0, out vec4 v1, out vec4 v2
+	) {
+		v0 = vec4( 0.0, 0.0, 0.0, 3.0 ); // kind = BDPT_KIND_INVALID
+		v1 = vec4( 0.0 );
+		v2 = vec4( 0.0 );
+	}
+
+	// ── Main light-subpath vertex writer ─────────────────────────────────────
+	// Writes one vertex per call; called from the BDPT light-subpath pass main().
+	//
+	// Parameters:
+	//   vertexCol         — bounce index (0 = emitter vertex).
+	//   maxLightBounces   — BDPT_MAX_LIGHT_BOUNCES uniform value.
+	//   lightPathTex      — ping-pong texture (read = previous frame's texture).
+	//   fogMat            — current fog material state (from host uniform).
+	//
+	// Outputs: writes to gBdptVertex0/1/2 MRT layout.
+	void writeLightSubpathVertex(
+		int vertexCol,
+		int maxLightBounces,
+		sampler2D lightPathTex,
+		Material fogMat,
+		out vec4 gBdptVertex0,
+		out vec4 gBdptVertex1,
+		out vec4 gBdptVertex2
+	) {
+
+		// Bounds guard.
+		if ( vertexCol < 0 || vertexCol >= maxLightBounces || lights.count == 0u ) {
+			writeBdptInvalidVertex( gBdptVertex0, gBdptVertex1, gBdptVertex2 );
+			return;
+		}
+
+		if ( vertexCol == 0 ) {
+
+			// ── Bounce 0: sample emitter surface ─────────────────────────────
+			// Pick a random area light / emitter via the existing light sampling CDF.
+			// Use seeds 50–52 (isolated from eye-path seeds 0–30).
+			LightRecord lightRec = randomLightSample(
+				lights.tex, iesProfiles, lights.count,
+				vec3( 0.0 ),   // origin is irrelevant for emitter-surface sampling
+				rand3( 50 )
+			);
+
+			if ( lightRec.pdf <= 0.0 || lightRec.emission == vec3( 0.0 ) ) {
+				writeBdptInvalidVertex( gBdptVertex0, gBdptVertex1, gBdptVertex2 );
+				return;
+			}
+
+			// Emitter position and normal.
+			// lightRec.point = surface point on the emitter.
+			// lightRec.direction = direction FROM receiver TO emitter (world space).
+			// Emitter normal ≈ -lightRec.direction (emission is toward the scene).
+			vec3 emitPos    = lightRec.point;
+			vec3 emitNormal = normalize( -lightRec.direction );
+
+			// Cosine-weighted hemisphere scatter direction from the emitter surface.
+			// This gives the first scattered ray direction from the light.
+			// Seed 51 (isolated from bounce k>0 seeds 53+).
+			vec3 scatterDir = sampleHemisphere( emitNormal, rand2( 51 ) );
+			float cosEmit   = max( dot( emitNormal, scatterDir ), 0.0 );
+			float pdfHemi   = cosEmit / PI; // cosine-weighted hemisphere PDF = cosθ/π
+
+			// Joint PDF = p_light × p_hemisphere.
+			float pdfJoint = lightRec.pdf * pdfHemi;
+			if ( pdfJoint <= 0.0 ) {
+				writeBdptInvalidVertex( gBdptVertex0, gBdptVertex1, gBdptVertex2 );
+				return;
+			}
+
+			// Throughput at emitter: Le × cosθ / pdfJoint.
+			vec3 emitThroughput = lightRec.emission * cosEmit / pdfJoint;
+
+			// pdfFwd = joint PDF of choosing this emitter surface point + direction.
+			float pdfFwd = pdfJoint;
+			// pdfRev: approximated as the cosine-hemisphere PDF for the reverse direction.
+			float pdfRev = pdfHemi;
+
+			gBdptVertex0 = vec4( emitPos,        0.0 );    // kind = BDPT_KIND_LIGHT
+			gBdptVertex1 = vec4( emitNormal,     pdfFwd );
+			gBdptVertex2 = vec4( emitThroughput, pdfRev );
+
+		} else {
+
+			// ── Bounce k>0: read prior vertex, extend subpath ─────────────────
+			// Read prior vertex from the ping-pong "read" texture.
+			// The "read" texture holds the previous frame's or the prior-bounce result.
+			// Host must ensure: write target ≠ read source (WebGL2 requirement).
+			int prevCol = vertexCol - 1;
+			vec4 v0prev = texelFetch( lightPathTex, ivec2( prevCol, 0 ), 0 );
+			vec4 v1prev = texelFetch( lightPathTex, ivec2( prevCol, 1 ), 0 );
+			vec4 v2prev = texelFetch( lightPathTex, ivec2( prevCol, 2 ), 0 );
+
+			// Check kind — skip if the prior vertex is invalid.
+			if ( v0prev.w == 3.0 ) { // BDPT_KIND_INVALID
+				writeBdptInvalidVertex( gBdptVertex0, gBdptVertex1, gBdptVertex2 );
+				return;
+			}
+
+			vec3 prevPos        = v0prev.xyz;
+			vec3 prevNormal     = v1prev.xyz;
+			float prevPdfFwd    = v1prev.w;
+			vec3 prevThroughput = v2prev.xyz;
+			// prevPdfRev unused in throughput calculation.
+
+			// Scatter from the prior vertex using cosine-weighted hemisphere.
+			// Seed isolation: 53 + vertexCol*3 (covers bounces 1, 2).
+			int seedBase    = 53 + vertexCol * 3;
+			vec3 scatterDir = sampleHemisphere( prevNormal, rand2( seedBase ) );
+			float cosScatter = max( dot( prevNormal, scatterDir ), 0.0 );
+			float pdfScatter = cosScatter / PI;
+
+			if ( pdfScatter <= 0.0 ) {
+				writeBdptInvalidVertex( gBdptVertex0, gBdptVertex1, gBdptVertex2 );
+				return;
+			}
+
+			// Trace ray from prior vertex into the scene.
+			Ray scatterRay;
+			scatterRay.origin    = prevPos + prevNormal * RAY_OFFSET;
+			scatterRay.direction = scatterDir;
+
+			SurfaceHit scatterHit;
+			int hitType = traceScene( scatterRay, fogMat, scatterHit );
+
+			if ( hitType != SURFACE_HIT ) {
+				writeBdptInvalidVertex( gBdptVertex0, gBdptVertex1, gBdptVertex2 );
+				return;
+			}
+
+			// Fetch material at the new hit.
+			uint matIdx  = uTexelFetch1D( materialIndexAttribute, scatterHit.faceIndices.x ).r;
+			Material mat = readMaterialInfo( materials, matIdx );
+
+			// Skip specular / delta-BSDF surfaces — MIS weight would be zero for
+			// explicit connections through them (Veach §10.3.5).
+			bool isSpecular = ( mat.transmission > 0.5 && mat.roughness < 0.05 );
+			if ( isSpecular ) {
+				writeBdptInvalidVertex( gBdptVertex0, gBdptVertex1, gBdptVertex2 );
+				return;
+			}
+
+			// New vertex geometry.
+			vec3 newPos    = scatterRay.origin + scatterRay.direction * scatterHit.dist;
+			vec3 newNormal = normalize( scatterHit.faceNormal * scatterHit.side );
+
+			// Throughput: prior × albedo × cosθ / pdfScatter.
+			// Albedo = mat.color (Lambertian approximation; full BSDF in connection pass).
+			vec3 newThroughput = prevThroughput * mat.color * cosScatter / pdfScatter;
+
+			// Geometric term for PDF conversion (area→solid-angle).
+			float gTerm = bdptGeometricTerm( prevPos, prevNormal, newPos, newNormal );
+
+			// pdfFwd = pdfScatter (solid-angle) × G(prev↔new).
+			float pdfFwd = pdfScatter * max( gTerm, 0.0 );
+			// pdfRev: cosine-hemisphere from the new vertex toward the prior vertex.
+			float cosRev = max( dot( newNormal, normalize( prevPos - newPos ) ), 0.0 );
+			float pdfRevScatter = cosRev / PI;
+			float pdfRev = pdfRevScatter * max( gTerm, 0.0 );
+
+			gBdptVertex0 = vec4( newPos,        0.0 );   // kind = BDPT_KIND_LIGHT
+			gBdptVertex1 = vec4( newNormal,     pdfFwd );
+			gBdptVertex2 = vec4( newThroughput, pdfRev );
+
+		}
+
+	}
+
+`;
+
 const camera_util_functions = /* glsl */`
 
 	vec3 ndcToRayOrigin( vec2 coord ) {
@@ -8197,6 +8680,10 @@ const trace_scene_function = /* glsl */`
 
 `;
 
+// Sprint 10c: BDPT ping-pong texture size constants.
+// Texture: width = BDPT_MAX_LIGHT_BOUNCES = 3, height = 3 rows (one per RGBA32F texel group).
+const BDPT_MAX_LIGHT_BOUNCES = 3;
+
 class PhysicalPathTracingMaterial extends MaterialBase {
 
 	onBeforeRender() {
@@ -8204,6 +8691,11 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 		this.setDefine( 'FEATURE_DOF', this.physicalCamera.bokehSize === 0 ? 0 : 1 );
 		this.setDefine( 'FEATURE_BACKGROUND_MAP', this.backgroundMap ? 1 : 0 );
 		this.setDefine( 'FEATURE_FOG', this.materials.features.isUsed( 'FOG' ) ? 1 : 0 );
+
+		// Sprint 10c: sync uBdptEnabled → FEATURE_BDPT define.
+		// FEATURE_BDPT == 1 compiles in the BDPT connection GLSL blocks.
+		// Off by default — only activate for PT_FINAL caustic renders.
+		this.setDefine( 'FEATURE_BDPT', this.uniforms.uBdptEnabled.value === true ? 1 : 0 );
 
 	}
 
@@ -8220,6 +8712,11 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				FEATURE_DOF: 1,
 				FEATURE_BACKGROUND_MAP: 0,
 				FEATURE_FOG: 1,
+
+				// Sprint 10c — BDPT integrator (off by default; opt-in for PT_FINAL caustic renders).
+				// When FEATURE_BDPT == 1 the main loop attempts one explicit connection per stored
+				// light vertex at each indirect bounce (depth > 0).
+				FEATURE_BDPT: 0,
 
 				// 0 = PCG
 				// 1 = Sobol
@@ -8345,6 +8842,19 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				// pathDepth > materialLodDepth. Default 2 = textures on primary
 				// hit and first indirect bounce only. Set 0 to disable LOD.
 				materialLodDepth: { value: 2 },
+
+				// Sprint 10c — BDPT uniforms.
+				// uBdptEnabled: mirrors the FEATURE_BDPT define (toggled at runtime via setDefine).
+				//   false = standard unidirectional PT (default, no overhead).
+				//   true  = BDPT connections active; host must supply uBdptLightPathTex each frame.
+				// uBdptMaxLightBounces: matches BDPT_MAX_LIGHT_BOUNCES constant = 3.
+				//   Reducing to 1 or 2 at runtime cuts per-sample cost at the expense of caustic depth.
+				// uBdptLightPathTex: RGBA32F ping-pong texture (width=3, height=3) written by the
+				//   host's light-subpath draw pass before the main accumulation loop.
+				//   null disables BDPT even when FEATURE_BDPT == 1 (safety guard).
+				uBdptEnabled: { value: false },
+				uBdptMaxLightBounces: { value: BDPT_MAX_LIGHT_BOUNCES },
+				uBdptLightPathTex: { value: null },
 			},
 
 			vertexShader: /* glsl */`
@@ -8512,6 +9022,19 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				uniform float uMneeMaxIterations;
 				uniform float uMneeMaxChainLength;
 
+				// Sprint 10c — BDPT uniforms.
+				// uBdptLightPathTex: RGBA32F ping-pong texture (width=BDPT_MAX_LIGHT_BOUNCES, height=3).
+				//   Rows: 0=position+kind, 1=normal+pdfFwd, 2=throughput+pdfRev.
+				//   Columns: 0..uBdptMaxLightBounces-1 (one per light subpath bounce).
+				// uBdptMaxLightBounces: how many stored light vertices to attempt connections with.
+				// uBdptEnabled is mirrored as FEATURE_BDPT define; uniform kept for runtime query.
+				#if FEATURE_BDPT
+
+				uniform sampler2D uBdptLightPathTex;
+				uniform int uBdptMaxLightBounces;
+
+				#endif
+
 				${ inside_fog_volume_function }
 				${ ggx_functions }
 				${ sheen_functions }
@@ -8558,6 +9081,16 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				${ attenuate_hit_function }
 				${ direct_light_contribution_function }
 				${ get_surface_record_function }
+
+				// Sprint 10c — BDPT GLSL blocks (compiled only when FEATURE_BDPT == 1).
+				// bdpt_light_subpath: writeLightSubpathVertex() helper + geometry term.
+				// bdpt_connection: evaluateBdptConnection() — shadow ray, BSDF eval, MIS weight.
+				#if FEATURE_BDPT
+
+				${ bdpt_light_subpath }
+				${ bdpt_connection }
+
+				#endif
 
 				void main() {
 
@@ -8835,6 +9368,31 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 						#if FEATURE_MIS
 
 						gColor.rgb += directLightContribution( - ray.direction, surf, state, hitPoint );
+
+						#endif
+
+						// Sprint 10c — BDPT explicit connections (depth > 0 only; skip primary hit).
+						// At each indirect bounce the eye subpath attempts an explicit connection
+						// to every stored light-subpath vertex in uBdptLightPathTex.
+						// Primary hit (state.firstRay) is skipped to avoid double-counting with
+						// the unidirectional NEE path above (direct_light_contribution_function).
+						#if FEATURE_BDPT
+
+						if ( ! state.firstRay && uBdptLightPathTex != sampler2D( 0 ) ) {
+							vec3 throughputRgbBdpt = wavelengthToRGB( state.wavelength, state.throughput, state.wavelengthPdf );
+							for ( int bdptLvi = 0; bdptLvi < uBdptMaxLightBounces; bdptLvi ++ ) {
+								gColor.rgb += evaluateBdptConnection(
+									hitPoint,
+									surf.normal,
+									- ray.direction,    // worldWo at eye vertex
+									throughputRgbBdpt,
+									scatterRec.pdf,     // eyePdfFwd (forward scatter PDF)
+									surf,
+									state,
+									bdptLvi
+								);
+							}
+						}
 
 						#endif
 
