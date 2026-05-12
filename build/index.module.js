@@ -6224,6 +6224,12 @@ const bsdf_functions = /* glsl */`
 
 		}
 
+		// RFE-03 / Sprint 14: apply selected front/back layer absorption exactly once
+		// in the BSDF evaluation flow, after all lobes have been summed.
+		// activeLayerWeight() returns 1.0 when surf.hasActiveLayer is false, so
+		// non-layered materials are unaffected.
+		color *= activeLayerWeight( surf, heroWavelength );
+
 		float pdf =
 			dpdf * diffuseWeight
 			+ spdf * specularWeight
@@ -9103,7 +9109,8 @@ function* renderTask() {
 
 				}
 
-				this.samples += ( 1 / totalTiles );
+				// Count proportional work: adaptive tiles may repeat 2–4× without starving convergence.
+				this.samples += ( repeats / totalTiles );
 
 				if ( x === tilesX - 1 && y === tilesY - 1 ) {
 
