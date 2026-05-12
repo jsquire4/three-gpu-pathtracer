@@ -726,7 +726,10 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						// the unidirectional NEE path above (direct_light_contribution_function).
 						#if FEATURE_BDPT
 
-						if ( ! state.firstRay && uBdptLightPathTex != sampler2D( 0 ) ) {
+						// uBdptLightPathTex validity is enforced by the host bridge:
+						// driveForkMaterialUniforms() forces uBdptEnabled=false when the
+						// texture is null, so FEATURE_BDPT=1 implies the texture is bound.
+						if ( ! state.firstRay ) {
 							vec3 throughputRgbBdpt = wavelengthToRGB( state.wavelength, state.throughput, state.wavelengthPdf );
 							for ( int bdptLvi = 0; bdptLvi < uBdptMaxLightBounces; bdptLvi ++ ) {
 								gColor.rgb += evaluateBdptConnection(

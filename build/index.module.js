@@ -7604,18 +7604,10 @@ const bdpt_connection = /* glsl */`
 
 	#define BDPT_CONTRIBUTION_CLAMP 100.0
 
-	// ── Geometric term ───────────────────────────────────────────────────────
-	// G(x↔y) = |cosθ_x · cosθ_y| / ‖x−y‖²  (Veach §8.3.2, Eq. 8.10).
-	// Returns 0 for degenerate / coincident points or tangent incidence.
-	float bdptG( vec3 posX, vec3 nX, vec3 posY, vec3 nY ) {
-		vec3 d    = posY - posX;
-		float d2  = dot( d, d );
-		if ( d2 <= 1e-12 ) return 0.0;
-		vec3 w    = d * inversesqrt( d2 );
-		float cX  = abs( dot( nX,  w ) );
-		float cY  = abs( dot( nY, -w ) ); // reverse direction at y
-		return ( cX * cY ) / d2;
-	}
+	// Note: bdptGeometricTerm() (Veach §8.3.2 G term) is defined in
+	// bdpt_light_subpath.glsl.js, which is included before this block.
+	// Both blocks compile under #if FEATURE_BDPT so the function is always
+	// available when evaluateBdptConnection() is reachable.
 
 	// ── Power-heuristic MIS weight (β=2, GLSL port of bdptConnectionMIS_full) ──
 	// Simplified 2-strategy form: w = p_s² / (p_s² + p_alt²).
@@ -7690,7 +7682,8 @@ const bdpt_connection = /* glsl */`
 		vec3  lightNormal     = lv1.xyz;
 		float lightPdfFwd     = lv1.w;
 		vec3  lightThroughput = lv2.xyz;
-		float lightPdfRev     = lv2.w;
+		// lv2.w = lightPdfRev — not used in the 2-strategy MIS approximation.
+		// The full Veach recursive ratio sweep (future patch) will consume this.
 
 		// ── Specular-vertex guard (Veach §10.3.5) ────────────────────────────
 		// If the eye surface is specular (delta BSDF), explicit connection has
@@ -7707,7 +7700,8 @@ const bdpt_connection = /* glsl */`
 		vec3 connDir = toLight / dist; // unit direction eye → light
 
 		// ── Geometric term G(eye ↔ light) ────────────────────────────────────
-		float gTerm = bdptG( eyePos, eyeNormal, lightPos, lightNormal );
+		// Uses bdptGeometricTerm() from bdpt_light_subpath.glsl.js (included first).
+		float gTerm = bdptGeometricTerm( eyePos, eyeNormal, lightPos, lightNormal );
 		if ( gTerm <= 0.0 ) return vec3( 0.0 );
 
 		// ── Visibility test ───────────────────────────────────────────────────
@@ -7923,9 +7917,9 @@ const bdpt_light_subpath = /* glsl */`
 
 			vec3 prevPos        = v0prev.xyz;
 			vec3 prevNormal     = v1prev.xyz;
-			float prevPdfFwd    = v1prev.w;
+			// v1prev.w = prevPdfFwd — not needed for scatter direction or throughput update.
 			vec3 prevThroughput = v2prev.xyz;
-			// prevPdfRev unused in throughput calculation.
+			// v2prev.w = prevPdfRev — not needed for scatter; pdfRev is recomputed at this vertex.
 
 			// Scatter from the prior vertex using cosine-weighted hemisphere.
 			// Seed isolation: 53 + vertexCol*3 (covers bounces 1, 2).
@@ -9378,7 +9372,10 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 						// the unidirectional NEE path above (direct_light_contribution_function).
 						#if FEATURE_BDPT
 
-						if ( ! state.firstRay && uBdptLightPathTex != sampler2D( 0 ) ) {
+						// uBdptLightPathTex validity is enforced by the host bridge:
+						// driveForkMaterialUniforms() forces uBdptEnabled=false when the
+						// texture is null, so FEATURE_BDPT=1 implies the texture is bound.
+						if ( ! state.firstRay ) {
 							vec3 throughputRgbBdpt = wavelengthToRGB( state.wavelength, state.throughput, state.wavelengthPdf );
 							for ( int bdptLvi = 0; bdptLvi < uBdptMaxLightBounces; bdptLvi ++ ) {
 								gColor.rgb += evaluateBdptConnection(

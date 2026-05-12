@@ -157,9 +157,9 @@ export const bdpt_light_subpath = /* glsl */`
 
 			vec3 prevPos        = v0prev.xyz;
 			vec3 prevNormal     = v1prev.xyz;
-			float prevPdfFwd    = v1prev.w;
+			// v1prev.w = prevPdfFwd — not needed for scatter direction or throughput update.
 			vec3 prevThroughput = v2prev.xyz;
-			// prevPdfRev unused in throughput calculation.
+			// v2prev.w = prevPdfRev — not needed for scatter; pdfRev is recomputed at this vertex.
 
 			// Scatter from the prior vertex using cosine-weighted hemisphere.
 			// Seed isolation: 53 + vertexCol*3 (covers bounces 1, 2).
