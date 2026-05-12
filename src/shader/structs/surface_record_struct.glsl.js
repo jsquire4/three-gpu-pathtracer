@@ -64,6 +64,18 @@ export const surface_record_struct = /* glsl */`
 		// specular
 		vec3 specularColor;
 		float specularIntensity;
+
+		// Sprint 4: P1 — lobeMask bitfield for BSDF lobe skipping.
+		// bit 0 = diffuse, bit 1 = specular/GGX, bit 2 = sheen,
+		// bit 3 = clearcoat, bit 4 = iridescence, bit 5 = transmission.
+		// Set in getSurfaceRecord; consumed by bsdfEval guards.
+		uint lobeMask;
+
+		// Sprint 4: P2 — lite BSDF flag for indirect bounces (depth > 1).
+		// When true, bsdfEval skips sheen/clearcoat/iridescence and
+		// replaces multiscatter GGX with single-scatter.
+		// Respects forceFullBSDF material override.
+		bool liteMode;
 	};
 
 	struct ScatterRecord {

@@ -63,8 +63,13 @@ export const bsdf_functions = /* glsl */`
 		vec3 f90Color = vec3( mix( surf.specularIntensity, 1.0, surf.metalness ) );
 		vec3 F = evaluateFresnel( dot( wo, wh ), eta, f0Color, f90Color );
 
-		vec3 iridescenceF = evalIridescence( 1.0, surf.iridescenceIor, dot( wi, wh ), surf.iridescenceThickness, f0Color );
-		F = mix( F, iridescenceF,  surf.iridescence );
+		// Sprint 4: P1 + P2 — skip iridescence Fresnel computation when lobeMask bit 4
+		// is clear (iridescence == 0) or in liteMode (indirect bounce). Saves two
+		// function calls on the hot GGX specular path for the majority of surfaces.
+		if ( ( surf.lobeMask & 16u ) != 0u && ! surf.liteMode ) {
+			vec3 iridescenceF = evalIridescence( 1.0, surf.iridescenceIor, dot( wi, wh ), surf.iridescenceThickness, f0Color );
+			F = mix( F, iridescenceF, surf.iridescence );
+		}
 		if ( surf.thinFilmEnabled > 0.5 && surf.thinFilmLayerCount > 0.5 ) {
 			float viewCos = surf.thinFilmAngleDependent ? abs( wo.z ) : 1.0;
 			vec2 thinFilmRt = thinFilmTMM(
@@ -408,12 +413,15 @@ export const bsdf_functions = /* glsl */`
 
 		}
 
-		// sheen
-		color *= mix( 1.0, sheenAlbedoScaling( wo, wi, surf ), surf.sheen );
-		color += sheenColor( wo, wi, halfVector, surf ) * surf.sheen;
+		// Sprint 4: P1 + P2 — lobeMask-gated and liteMode-gated optional lobes.
+		// sheen: skip entirely in liteMode or when lobeMask bit 2 is clear.
+		if ( ( surf.lobeMask & 4u ) != 0u && ! surf.liteMode ) {
+			color *= mix( 1.0, sheenAlbedoScaling( wo, wi, surf ), surf.sheen );
+			color += sheenColor( wo, wi, halfVector, surf ) * surf.sheen;
+		}
 
-		// clearcoat
-		if ( clearcoatWi.z >= 0.0 && clearcoatWeight > 0.0 ) {
+		// clearcoat: skip entirely in liteMode or when lobeMask bit 3 is clear.
+		if ( ( surf.lobeMask & 8u ) != 0u && ! surf.liteMode && clearcoatWi.z >= 0.0 && clearcoatWeight > 0.0 ) {
 
 			vec3 clearcoatHalfVector = getHalfVector( clearcoatWo, clearcoatWi );
 			cpdf = clearcoatEval( clearcoatWo, clearcoatWi, clearcoatHalfVector, surf, color );

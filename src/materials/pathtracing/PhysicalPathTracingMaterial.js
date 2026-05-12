@@ -170,6 +170,12 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				uCausticStrategy: { value: 0 },
 				uMneeMaxIterations: { value: 8.0 },
 				uMneeMaxChainLength: { value: 3.0 },
+
+				// Sprint 4: P3 — Material LOD by depth.
+				// Texture fetches are replaced by flat material constants at
+				// pathDepth > materialLodDepth. Default 2 = textures on primary
+				// hit and first indirect bounce only. Set 0 to disable LOD.
+				materialLodDepth: { value: 2 },
 			},
 
 			vertexShader: /* glsl */`
@@ -583,7 +589,8 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						SurfaceRecord surf;
 						if (
 							getSurfaceRecord(
-								material, materialIndex, surfaceHit, attributesArray, state.accumulatedRoughness,
+								material, materialIndex, surfaceHit, attributesArray,
+								state.accumulatedRoughness, int( state.depth ),
 								surf
 							) == SKIP_SURFACE
 						) {
