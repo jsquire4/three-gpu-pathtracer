@@ -162,8 +162,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				// Sprint 12: hero-wavelength spectral accumulator uniforms.
 				// CMF arrays (81 entries each, 380–780 nm at 5 nm steps).
 				// Populated from @vitrum/shared-samplers CIE_X/Y/Z_TABLE on host init.
-				// uYCmfCdf[82]: normalised CDF of ȳ(λ) for hero wavelength sampling.
-				// uYCmfIntegral: ∫ Y dλ (nm) ≈ 106.857.
+				// uXCmfCdf/uYCmfCdf/uZCmfCdf[82]: normalised CDFs for the GLSL MIS
+				//   hero-wavelength sampler (Wilkie 2015 §3.3 — one-sample MIS across
+				//   all three CMFs gives balanced chromatic coverage at low SPP).
+				// uXCmfIntegral/uYCmfIntegral/uZCmfIntegral: ∫ X/Y/Z dλ (nm). All
+				//   ≈ 106.857 by CIE 1931 chromaticity-of-equal-energy-white normalisation.
 				//
 				// Sprint 12 Cauchy IOR uniforms (replaces Sprint 8 ior0 + dispersionStrength).
 				// iorCauchyA/B/C in µm units; see plan/sprint-12-pt-fork-patch.md §3.
@@ -173,8 +176,12 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				uCmfX: { value: new Float32Array( 81 ) },
 				uCmfY: { value: new Float32Array( 81 ) },
 				uCmfZ: { value: new Float32Array( 81 ) },
+				uXCmfCdf: { value: new Float32Array( 82 ) },
 				uYCmfCdf: { value: new Float32Array( 82 ) },
+				uZCmfCdf: { value: new Float32Array( 82 ) },
+				uXCmfIntegral: { value: 106.857 },
 				uYCmfIntegral: { value: 106.857 },
+				uZCmfIntegral: { value: 106.857 },
 				uSpectralRendering: { value: 0 },
 				iorCauchyA: { value: 1.5 },
 				iorCauchyB: { value: 0.0 },
@@ -477,7 +484,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 					// path tracing state
 					RenderState state = initRenderState();
-					state.wavelength = sampleHeroWavelength( rand( 30 ), state.wavelengthPdf );
+					// One-sample MIS across X/Y/Z CMFs (Wilkie 2015 §3.3) — uses
+					// dim 30 for strategy selection, dim 31 for inverse-CDF on
+					// the chosen strategy. Returned pdf is the mixture pdf
+					// (balance heuristic), the correct MC denominator.
+					state.wavelength = sampleHeroWavelengthMIS( rand( 30 ), rand( 31 ), state.wavelengthPdf );
 					state.transmissiveTraversals = transmissiveBounces;
 					#if FEATURE_FOG
 

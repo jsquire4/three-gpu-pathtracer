@@ -37,12 +37,22 @@ export const spectral_accumulator = /* glsl */`
 	uniform float uCmfY[81];
 	uniform float uCmfZ[81];
 
-	// Y-CMF CDF for hero wavelength importance sampling (82 entries).
-	// uYCmfCdf[0] = 0, uYCmfCdf[81] = 1.
+	// CMF CDFs for hero wavelength importance sampling (82 entries each).
+	// uXCmfCdf, uYCmfCdf, uZCmfCdf — each starts at 0 and ends at 1.
+	// Wilkie 2015 §3.3: one-sample MIS across all three strategies gives
+	// balanced chromatic coverage at low SPP (Y-only sampling collapses
+	// blue and most red because Y(λ) is heavily concentrated near 555 nm).
+	uniform float uXCmfCdf[82];
 	uniform float uYCmfCdf[82];
+	uniform float uZCmfCdf[82];
 
-	// Integral of Y CMF over [380, 780] nm (≈ 106.857 nm).
+	// Integrals of X/Y/Z CMFs over [380, 780] nm. By CIE 1931 normalisation
+	// these are all equal to ≈ 106.857 (chromaticity of equal-energy white
+	// is (1/3, 1/3, 1/3)) — but the host uploads them independently so the
+	// shader does not encode the convention.
+	uniform float uXCmfIntegral;
 	uniform float uYCmfIntegral;
+	uniform float uZCmfIntegral;
 
 	// Non-zero enables experimental hero-wavelength RGB reconstruction. The
 	// default preview path stays RGB-stable because single-wavelength display
@@ -73,40 +83,94 @@ export const spectral_accumulator = /* glsl */`
 
 	// ── Hero wavelength importance sampling ────────────────────────────────────
 
-	// Sample a hero wavelength from pdf(λ) ∝ Y(λ) (luminous efficiency).
-	// Returns wavelength in [380, 780] nm; outputs pdf in nm⁻¹.
-	// GLSL mirror of @vitrum/shared-samplers/src/wavelengthSampling.ts::sampleHeroWavelength.
-	//
-	// CDF inversion: binary search on the 82-entry uYCmfCdf array.
-	float sampleHeroWavelength( float u, out float pdf ) {
-		// Clamp u to valid range.
+	// Wilkie 2015 §3.3 CMF strategy index — used for both per-strategy CDF
+	// dispatch in the MIS sampler and for the mixture pdf evaluation.
+	const int CMF_STRATEGY_X = 0;
+	const int CMF_STRATEGY_Y = 1;
+	const int CMF_STRATEGY_Z = 2;
+
+	// Linear interpolation helper for any of the 81-entry CMF tables, given
+	// the table-relative segment index 'lo' and segment fraction 't'.
+	// Returns CMF value at the interpolated wavelength.
+	float cmfAtSegment( float table[81], int lo, float t ) {
+		float vLo = table[ lo ];
+		float vHi = ( lo < 80 ) ? table[ lo + 1 ] : 0.0;
+		return vLo + t * ( vHi - vLo );
+	}
+
+	// Inverse-CDF sampling helper. Given a uniform u and a 82-entry CDF
+	// (starting at 0, ending at 1), returns the wavelength in [380, 780] nm
+	// and writes the CDF segment index + fraction into the out parameters.
+	// Caller can then look up CMF values at the sampled lambda via cmfAtSegment.
+	float sampleCmfCdfInverse( float u, float cdf[82], out int outLo, out float outT ) {
 		float uClamped = clamp( u, 0.0, 1.0 - 1e-7 );
 
-		// Binary search over CDF[0..81] (82 entries).
 		int lo = 0;
 		int hi = 80;
-		for ( int iter = 0; iter < 7; iter ++ ) {  // 7 iterations covers 2^7 = 128 > 82
+		for ( int iter = 0; iter < 7; iter ++ ) {  // 2^7 = 128 > 82 entries
 			int mid = ( lo + hi ) / 2;
-			if ( uYCmfCdf[ mid + 1 ] <= uClamped ) {
+			if ( cdf[ mid + 1 ] <= uClamped ) {
 				lo = mid + 1;
 			} else {
 				hi = mid;
 			}
 		}
 
-		// Linear interpolation within the segment.
-		float cdfLo = uYCmfCdf[ lo ];
-		float cdfHi = uYCmfCdf[ lo + 1 ];
-		float yLo = uCmfY[ lo ];
-		float yHi = ( lo < 80 ) ? uCmfY[ lo + 1 ] : 0.0;
-
+		float cdfLo = cdf[ lo ];
+		float cdfHi = cdf[ lo + 1 ];
 		float t = ( cdfHi > cdfLo ) ? ( uClamped - cdfLo ) / ( cdfHi - cdfLo ) : 0.0;
-		float lambda = float( 380 + lo * 5 ) + t * 5.0;
-		lambda = clamp( lambda, 380.0, 780.0 );
+		float lambda = clamp( float( 380 + lo * 5 ) + t * 5.0, 380.0, 780.0 );
 
-		// pdf(λ) = Y(λ) / ∫Y(λ)dλ
-		float yAtLambda = yLo + t * ( yHi - yLo );
+		outLo = lo;
+		outT = t;
+		return lambda;
+	}
+
+	// Mixture pdf evaluated at λ — used by both legacy single-strategy and
+	// MIS multi-strategy samplers as the Monte Carlo weight denominator.
+	// pdf_mis(λ) = (X(λ)/∫X + Y(λ)/∫Y + Z(λ)/∫Z) / 3   (balance heuristic)
+	float misMixturePdf( int lo, float t ) {
+		float x = cmfAtSegment( uCmfX, lo, t );
+		float y = cmfAtSegment( uCmfY, lo, t );
+		float z = cmfAtSegment( uCmfZ, lo, t );
+		float pX = ( uXCmfIntegral > 0.0 ) ? x / uXCmfIntegral : 0.0;
+		float pY = ( uYCmfIntegral > 0.0 ) ? y / uYCmfIntegral : 0.0;
+		float pZ = ( uZCmfIntegral > 0.0 ) ? z / uZCmfIntegral : 0.0;
+		return ( pX + pY + pZ ) / 3.0;
+	}
+
+	// Sample a hero wavelength from pdf(λ) ∝ Y(λ) (luminous efficiency).
+	// GLSL mirror of @vitrum/shared-samplers/src/wavelengthSampling.ts::sampleHeroWavelength.
+	// Kept for backward compat — production sampler is sampleHeroWavelengthMIS.
+	float sampleHeroWavelength( float u, out float pdf ) {
+		int lo;
+		float t;
+		float lambda = sampleCmfCdfInverse( u, uYCmfCdf, lo, t );
+		float yAtLambda = cmfAtSegment( uCmfY, lo, t );
 		pdf = ( uYCmfIntegral > 0.0 ) ? yAtLambda / uYCmfIntegral : 0.0;
+		return lambda;
+	}
+
+	// One-sample MIS hero wavelength sampler across X, Y, Z CMFs (Wilkie 2015 §3.3).
+	// GLSL mirror of @vitrum/shared-samplers/src/wavelengthSampling.ts::sampleHeroWavelengthMIS.
+	//
+	// uStrategy picks one of {X, Y, Z} with probability 1/3 each;
+	// uLambda   inverse-CDF-samples within the chosen strategy.
+	// The returned pdf is the MIXTURE pdf (balance heuristic), not the
+	// per-strategy pdf — this is the correct denominator for the MC estimator.
+	float sampleHeroWavelengthMIS( float uStrategy, float uLambda, out float pdf ) {
+		float s = clamp( uStrategy, 0.0, 1.0 - 1e-7 );
+		int lo;
+		float t;
+		float lambda;
+		if ( s < 1.0 / 3.0 ) {
+			lambda = sampleCmfCdfInverse( uLambda, uXCmfCdf, lo, t );
+		} else if ( s < 2.0 / 3.0 ) {
+			lambda = sampleCmfCdfInverse( uLambda, uYCmfCdf, lo, t );
+		} else {
+			lambda = sampleCmfCdfInverse( uLambda, uZCmfCdf, lo, t );
+		}
+		pdf = misMixturePdf( lo, t );
 		return lambda;
 	}
 
