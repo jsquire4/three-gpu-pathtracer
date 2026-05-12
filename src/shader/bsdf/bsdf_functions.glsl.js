@@ -16,6 +16,13 @@ export const bsdf_functions = /* glsl */`
 	// by material_struct.glsl.js::readMaterialInfo().
 	const uint TRANSLUCENT_BIT = 0x10u;  // bit 4
 
+	// RFE-03 / Sprint 14 — defined before bsdfEval since GLSL parses top-down and
+	// some drivers don't accept forward-declarations whose params reference user structs.
+	float activeLayerWeight( SurfaceRecord surf, float heroWavelength ) {
+		if ( ! surf.hasActiveLayer ) return 1.0;
+		return heroScalarFromRgb( surf.activeLayerTransmission, heroWavelength );
+	}
+
 	// diffuse
 	float diffuseEval( vec3 wo, vec3 wi, vec3 wh, SurfaceRecord surf, inout vec3 color ) {
 
@@ -526,11 +533,6 @@ export const bsdf_functions = /* glsl */`
 	// The scatter position is sampled from an exponential distribution along
 	// the refracted direction; the scattered direction is sampled from HG.
 	// Mirrors @vitrum/shared-samplers/src/hgPhase.ts::sampleHG.
-	float activeLayerWeight( SurfaceRecord surf, float heroWavelength ) {
-		if ( ! surf.hasActiveLayer ) return 1.0;
-		return heroScalarFromRgb( surf.activeLayerTransmission, heroWavelength );
-	}
-
 	ScatterRecord sssSample( vec3 worldWo, SurfaceRecord surf, float heroWavelength ) {
 
 		float tScatter = sampleExponential( rand( 17 ), u_sssSigmaT, 1e6 );

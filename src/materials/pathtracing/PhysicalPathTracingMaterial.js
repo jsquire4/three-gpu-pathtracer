@@ -231,12 +231,12 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 				#include <common>
 
 				// Sprint 5: MRT G-buffer outputs (Decision 12).
-				// location 0: gColor       — accumulated radiance + alpha (replaces gColor)
+				// location 0: pc_fragColor — three.js auto-injects this in GLSL3 ShaderMaterial,
+				//             so we only declare locations 1 and 2 ourselves to avoid a duplicate.
 				// location 1: gNormalDepth — world normal (xyz, encoded [0,1]) + linear depth (w)
 				// location 2: gAlbedo      — demodulated base color, no lighting
 				// When the host allocates a plain render target (non-MRT), only location 0 is
 				// written; locations 1 and 2 are harmlessly ignored by the driver.
-				layout(location = 0) out vec4 gColor;
 				layout(location = 1) out vec4 gNormalDepth;
 				layout(location = 2) out vec4 gAlbedo;
 
@@ -469,7 +469,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 					vec3 gbufAlbedo = vec3( 0.0 );
 
 					// final color
-					gColor = vec4( 0, 0, 0, 1 );
+					pc_fragColor = vec4( 0, 0, 0, 1 );
 
 					// surface results
 					SurfaceHit surfaceHit;
@@ -550,11 +550,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 									// weight the contribution
 									// NOTE: Only area lights are supported for forward sampling and can be hit
 									float misWeight = misHeuristic( scatterRec.pdf, lightRec.pdf / lightsDenom );
-									gColor.rgb += lightRec.emission * throughputRgb * misWeight;
+									pc_fragColor.rgb += lightRec.emission * throughputRgb * misWeight;
 
 									#else
 
-									gColor.rgb += lightRec.emission * throughputRgb;
+									pc_fragColor.rgb += lightRec.emission * throughputRgb;
 
 									#endif
 
@@ -568,14 +568,14 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 							if ( state.firstRay || state.transmissiveRay ) {
 
-								gColor.rgb += sampleBackground( ray.direction, rand2( 2 ) ) * throughputRgb;
+								pc_fragColor.rgb += sampleBackground( ray.direction, rand2( 2 ) ) * throughputRgb;
 								#if FEATURE_ADDITIVE_ACCUM
 
-								gColor.a = 1.0;
+								pc_fragColor.a = 1.0;
 
 								#else
 
-								gColor.a = backgroundAlpha;
+								pc_fragColor.a = backgroundAlpha;
 
 								#endif
 
@@ -590,11 +590,11 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 								// and weight the contribution
 								float misWeight = misHeuristic( scatterRec.pdf, envPdf );
-								gColor.rgb += environmentIntensity * envColor * throughputRgb * misWeight;
+								pc_fragColor.rgb += environmentIntensity * envColor * throughputRgb * misWeight;
 
 								#else
 
-								gColor.rgb +=
+								pc_fragColor.rgb +=
 									environmentIntensity *
 									sampleEquirectColor( envMapInfo.map, envRotation3x3 * ray.direction ) *
 									throughputRgb;
@@ -640,7 +640,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						// early out if this is a matte material
 						if ( material.matte && state.firstRay ) {
 
-							gColor = vec4( 0.0 );
+							pc_fragColor = vec4( 0.0 );
 							break;
 
 						}
@@ -715,7 +715,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						// next event estimation
 						#if FEATURE_MIS
 
-						gColor.rgb += directLightContribution( - ray.direction, surf, state, hitPoint );
+						pc_fragColor.rgb += directLightContribution( - ray.direction, surf, state, hitPoint );
 
 						#endif
 
@@ -732,7 +732,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						if ( ! state.firstRay ) {
 							vec3 throughputRgbBdpt = wavelengthToRGB( state.wavelength, state.throughput, state.wavelengthPdf );
 							for ( int bdptLvi = 0; bdptLvi < uBdptMaxLightBounces; bdptLvi ++ ) {
-								gColor.rgb += evaluateBdptConnection(
+								pc_fragColor.rgb += evaluateBdptConnection(
 									hitPoint,
 									surf.normal,
 									- ray.direction,    // worldWo at eye vertex
@@ -798,7 +798,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 											float focus = pow( max( dot( walkDir, - ray.direction ), 0.0 ), 10.0 );
 											float chainNorm = 1.0 / max( float( traversedChain + 1 ), 1.0 );
 											float manifoldWeight = focus * chainNorm * chainAttenuation;
-											gColor.rgb += throughputRgb * surf.color * manifoldWeight;
+											pc_fragColor.rgb += throughputRgb * surf.color * manifoldWeight;
 										}
 									}
 								}
@@ -833,7 +833,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 										}
 									}
 									float density = photonAccum / float( PHOTON_SAMPLES );
-									gColor.rgb += throughputRgb * surf.color * density * surf.transmission;
+									pc_fragColor.rgb += throughputRgb * surf.color * density * surf.transmission;
 								}
 							}
 						}
@@ -855,7 +855,7 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 						}
 
 						// accumulate emissive color
-						gColor.rgb += ( surf.emission * throughputRgb );
+						pc_fragColor.rgb += ( surf.emission * throughputRgb );
 
 						// skip the sample if our PDF or ray is impossible
 						if ( scatterRec.pdf <= 0.0 || ! isDirectionValid( scatterRec.direction, surf.normal, surf.faceNormal ) ) {
@@ -931,19 +931,19 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 					}
 
 					if ( uRadianceClamp > 0.0 ) {
-						float sampleLuminance = dot( gColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+						float sampleLuminance = dot( pc_fragColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
 						if ( sampleLuminance > uRadianceClamp ) {
-							gColor.rgb *= uRadianceClamp / sampleLuminance;
+							pc_fragColor.rgb *= uRadianceClamp / sampleLuminance;
 						}
 					}
 
 					#if FEATURE_ADDITIVE_ACCUM
 
-					gColor.a = 1.0;
+					pc_fragColor.a = 1.0;
 
 					#else
 
-					gColor.a *= opacity;
+					pc_fragColor.a *= opacity;
 
 					#endif
 
@@ -951,12 +951,12 @@ export class PhysicalPathTracingMaterial extends MaterialBase {
 
 					// output the number of rays checked in the path and number of
 					// transmissive rays encountered.
-					gColor.rgb = vec3(
+					pc_fragColor.rgb = vec3(
 						float( state.depth ),
 						transmissiveBounces - state.transmissiveTraversals,
 						0.0
 					);
-					gColor.a = 1.0;
+					pc_fragColor.a = 1.0;
 
 					#endif
 
